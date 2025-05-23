@@ -210,7 +210,7 @@ where
     }
 }
 
-impl<'lock, L, B, H> DerefMut for StorageLock<'lock, L, B, H>
+impl<L, B, H> DerefMut for StorageLock<'_, L, B, H>
 where
     L: Label,
     B: InternerBackend,

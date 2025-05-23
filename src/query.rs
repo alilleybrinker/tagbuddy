@@ -1,18 +1,11 @@
-use std::{hash::BuildHasher, collections::{BTreeMap, HashSet}, marker::PhantomData};
+#![allow(dead_code)]
+
+use crate::{label::Label, parse::Parser, tag::Tag, TagManager};
+use std::{collections::BTreeMap, hash::BuildHasher, marker::PhantomData};
 use string_interner::backend::Backend as InternerBackend;
 use string_interner::Symbol;
-use crate::{TagManager, label::Label, tag::Tag, parse::Parser};
 
-
-struct QueryBuilder<
-    'm,
-    L,
-    S,
-    T,
-    P,
-    B,
-    H,
->
+struct QueryBuilder<'m, L, S, T, P, B, H>
 where
     L: Label,
     S: Symbol,
@@ -25,20 +18,30 @@ where
     indices: QueryIndices<S>,
 }
 
-struct QueryIndices<S> where S: Symbol {
+struct QueryIndices<S>
+where
+    S: Symbol,
+{
     plain: PlainIndex<S>,
     key_value: KeyValueIndex<S>,
     multipart: MultipartIndex<S>,
 }
 
-struct PlainIndex<S>(Vec<S>) where S: Symbol;
+struct PlainIndex<S>(Vec<S>)
+where
+    S: Symbol;
 
-struct KeyValueIndex<S>(BTreeMap<S, Vec<S>>) where S: Symbol;
+struct KeyValueIndex<S>(BTreeMap<S, Vec<S>>)
+where
+    S: Symbol;
 
-struct MultipartIndex<S>(Vec<Trie<S>>) where S: Symbol;
+struct MultipartIndex<S>(Vec<Trie<S>>)
+where
+    S: Symbol;
 
-struct Trie<S>(PhantomData<S>) where S: Symbol;
-
+struct Trie<S>(PhantomData<S>)
+where
+    S: Symbol;
 
 /*
 The basic design of the query system is:
