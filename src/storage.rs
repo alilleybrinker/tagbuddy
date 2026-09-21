@@ -100,15 +100,28 @@ pub type DefaultStorage<'brand> =
 /// ```
 ///
 /// This is why there's no way to build a [`Storage`] without either consuming a [`Guard`]
-/// or deriving it from an existing [`Storage`] (via [`Storage::shallow_clone`], which keeps
+/// or deriving it from an existing [`Storage`] (via [`Storage::share_as`], which keeps
 /// the same interner _and_ the same brand). A constructor that let the caller pick the
 /// `'brand` freely — a `Default` or `From` impl, say — would let a brand be attached to an
 /// interner that never minted it, which is exactly the confusion the brand exists to prevent.
 ///
+/// # What the brand does not cover
+///
+/// A brand pins the _identity_ of the interner, not its _contents_. Interning only ever
+/// adds to an interner, so symbols stay valid as it grows, but anything holding a
+/// [`StorageLock`] can reach `&mut StringInterner` and replace its contents wholesale,
+/// which invalidates every symbol handed out before. That's out of reach of the brand:
+/// it's the same interner afterwards, just emptied. Don't do that.
+///
+/// [`Storage`] also derefs to its `Arc`, which is an _unbranded_ handle. Nothing unsound
+/// follows from holding one — [`Storage::shared`] mints a fresh brand for it, and
+/// [`Storage::try_share_as`] checks before reusing an existing one — but note that the
+/// handle on its own no longer says which brand it belongs to.
+///
 /// # Labels
 ///
 /// The `L` parameter is a separate, and weaker, marker: it distinguishes _vocabularies_ of
-/// tags that share one interner. [`Storage::shallow_clone`] re-labels a [`Storage`] while
+/// tags that share one interner. [`Storage::share_as`] re-labels a [`Storage`] while
 /// keeping its brand, so two [`TagManager`]s can share interned string data while still
 /// keeping their tag types distinct.
 ///
@@ -172,27 +185,54 @@ where
         Storage(Arc::new(Mutex::new(interner)), PhantomData, guard.into())
     }
 
-    /// Produce a [`Storage`] which may share its underlying interner.
+    /// Wrap an interner handle that didn't come from an existing [`Storage`], minting a
+    /// new brand for it.
     ///
-    /// The new [`Storage`] gets its own brand, so tags from it can't be resolved through
-    /// any other [`Storage`] over the same interner. That's stricter than it needs to be
-    /// — the symbols really are interchangeable — but it's the safe direction to err in.
-    /// To share an interner _and_ its brand, use [`Storage::shallow_clone`].
+    /// A bare `Arc` carries no brand, so there's no brand here to preserve and a fresh one
+    /// is the only correct answer: whoever owned the interner before wasn't handing out
+    /// [`Tag`]s, because tags only come from a branded [`Storage`]. If the handle _is_ one
+    /// of this crate's, prefer [`Storage::share_as`], or [`Storage::try_share_as`] when all
+    /// you have is the raw handle.
     pub fn shared(guard: Guard<'brand>, interner: &Arc<Mutex<StringInterner<B, H>>>) -> Self {
         Storage(Arc::clone(interner), PhantomData, guard.into())
     }
 
-    /// Make a [`Storage`] sharing the underlying interner of the provided [`Storage`].
+    /// Make a [`Storage`] sharing this one's interner, under a different label.
     ///
-    /// The result keeps the same `'brand`, because it's backed by the same interner, and
-    /// so its symbols resolve identically. Only the label changes, which is what makes it
+    /// The result keeps the same `'brand`, because it's backed by the same interner and so
+    /// its symbols resolve identically. Only the label changes, which is what makes it
     /// possible for two [`TagManager`]s to share string data while keeping their tag
     /// vocabularies distinct.
-    pub fn shallow_clone<L2>(&self) -> Storage<'brand, L2, B, H>
+    pub fn share_as<L2>(&self) -> Storage<'brand, L2, B, H>
     where
         L2: Label,
     {
         Storage(Arc::clone(&self.0), PhantomData, self.2)
+    }
+
+    /// Share a raw interner handle under this [`Storage`]'s brand, if it really is this
+    /// [`Storage`]'s interner.
+    ///
+    /// [`Storage`] derefs to its `Arc`, so a handle can get separated from the [`Storage`]
+    /// it belongs to — stored in a struct field, handed to other code, and so on. Passing
+    /// such a handle to [`Storage::shared`] would mint a _new_ brand for an interner that
+    /// already has one, and the resulting [`Storage`] couldn't resolve any of the tags the
+    /// original had already produced, even though the symbols are the very same ones.
+    ///
+    /// This is the way out of that: [`Arc::ptr_eq`] settles whether the handle is the same
+    /// allocation, and if it is, adopting the brand is sound, because "same allocation"
+    /// _is_ what the brand stands for.
+    ///
+    /// Returns `None` when the handle is a different interner, where adopting the brand
+    /// would be exactly the confusion brands exist to prevent.
+    pub fn try_share_as<L2>(
+        &self,
+        interner: &Arc<Mutex<StringInterner<B, H>>>,
+    ) -> Option<Storage<'brand, L2, B, H>>
+    where
+        L2: Label,
+    {
+        Arc::ptr_eq(&self.0, interner).then(|| Storage(Arc::clone(interner), PhantomData, self.2))
     }
 
     /// Lock the [`Storage`]'s underlying [`StringInterner`].
@@ -251,18 +291,6 @@ where
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl<L, B, H> DerefMut for Storage<'_, L, B, H>
-where
-    L: Label,
-    B: InternerBackend,
-    <B as InternerBackend>::Symbol: Symbol,
-    H: BuildHasher,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 

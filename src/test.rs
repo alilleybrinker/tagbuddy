@@ -16,6 +16,7 @@ use crate::tag::TagKind;
 use crate::TagManager;
 use anyhow::anyhow as err;
 use anyhow::Result;
+use std::sync::Arc;
 use string_interner::DefaultSymbol;
 use string_interner::Symbol;
 
@@ -381,4 +382,75 @@ fn multipart_tag_single_part_still_depends_on_policy() -> Result<()> {
     ));
 
     Ok(())
+}
+
+#[test]
+fn share_as_keeps_the_brand() -> Result<()> {
+    make_guard!(guard);
+
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(DefaultStorage::fresh(guard))
+        .build();
+
+    // A second manager over the same interner, sharing the brand.
+    let shared = TagManager::builder()
+        .parser(Plain::new())
+        .storage(manager.storage().share_as::<DefaultLabel>())
+        .build();
+
+    let tag = manager.parse_tag("hello")?;
+
+    // Same brand, so the tag resolves through either one.
+    assert_eq!(manager.resolve_tag(&tag)?, "hello");
+    assert_eq!(shared.resolve_tag(&tag)?, "hello");
+
+    Ok(())
+}
+
+#[test]
+fn try_share_as_adopts_the_brand_for_the_same_interner() -> Result<()> {
+    make_guard!(guard);
+
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(DefaultStorage::fresh(guard))
+        .build();
+
+    let tag = manager.parse_tag("hello")?;
+
+    // A bare handle to the very same interner, separated from its storage.
+    let handle = Arc::clone(manager.storage());
+
+    let adopted = manager
+        .storage()
+        .try_share_as::<DefaultLabel>(&handle)
+        .expect("the handle is this storage's own interner");
+
+    let adopted_manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(adopted)
+        .build();
+
+    // The brand came along, so the original tag still resolves.
+    assert_eq!(adopted_manager.resolve_tag(&tag)?, "hello");
+
+    Ok(())
+}
+
+#[test]
+fn try_share_as_refuses_a_different_interner() {
+    make_guard!(one);
+    make_guard!(two);
+
+    let first = DefaultStorage::fresh(one);
+    let second = DefaultStorage::fresh(two);
+
+    // A handle to a genuinely different interner must not inherit `first`'s brand.
+    let foreign = Arc::clone(&second);
+    assert!(first.try_share_as::<DefaultLabel>(&foreign).is_none());
+
+    // ... while its own handle is accepted.
+    let own = Arc::clone(&first);
+    assert!(first.try_share_as::<DefaultLabel>(&own).is_some());
 }

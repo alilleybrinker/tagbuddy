@@ -46,7 +46,7 @@ pub mod blog {
             // brand too -- only the label differs, keeping the two vocabularies apart.
             let rating_manager = TagManager::builder()
                 .parser(KeyValue::new(KvPolicy::NoAmbiguousSep))
-                .storage(tag_manager.storage().shallow_clone::<Ratings>())
+                .storage(tag_manager.storage().share_as::<Ratings>())
                 .build();
 
             Self {
