@@ -76,6 +76,9 @@ use crate::tag::Tagged;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::fmt::Result as FmtResult;
+use std::ops::BitAnd;
+use std::ops::BitOr;
+use std::ops::Not as NotOp;
 use std::sync::Arc;
 
 /// A predicate over a tagged *item*.
@@ -163,6 +166,68 @@ pub enum Match {
     Any(Vec<Match>),
 }
 
+impl Match {
+    /// A [`PlainTag`] whose whole content is this string.
+    ///
+    /// [`PlainTag`]: crate::tag::PlainTag
+    pub fn exact(s: impl Into<String>) -> Match {
+        Match::Exact(s.into())
+    }
+
+    /// A [`KeyValueTag`] with this key, whatever its value.
+    ///
+    /// [`KeyValueTag`]: crate::tag::KeyValueTag
+    pub fn has_key(key: impl Into<String>) -> Match {
+        Match::HasKey(key.into())
+    }
+
+    /// A [`KeyValueTag`] with this key, whose value satisfies `value`.
+    ///
+    /// [`KeyValueTag`]: crate::tag::KeyValueTag
+    pub fn key_value(key: impl Into<String>, value: Value) -> Match {
+        Match::KeyValue {
+            key: key.into(),
+            value,
+        }
+    }
+
+    /// A [`MultipartTag`] whose parts are exactly these.
+    ///
+    /// [`MultipartTag`]: crate::tag::MultipartTag
+    pub fn path(parts: impl IntoIterator<Item = impl Into<String>>) -> Match {
+        Match::Path(parts.into_iter().map(Into::into).collect())
+    }
+
+    /// A [`MultipartTag`] whose leading parts are these.
+    ///
+    /// [`MultipartTag`]: crate::tag::MultipartTag
+    pub fn prefix(parts: impl IntoIterator<Item = impl Into<String>>) -> Match {
+        Match::Prefix(parts.into_iter().map(Into::into).collect())
+    }
+
+    /// One tag satisfying every one of these.
+    pub fn all_of(matches: impl IntoIterator<Item = Match>) -> Match {
+        Match::All(matches.into_iter().collect())
+    }
+
+    /// One tag satisfying at least one of these.
+    pub fn any_of(matches: impl IntoIterator<Item = Match>) -> Match {
+        Match::Any(matches.into_iter().collect())
+    }
+}
+
+impl Value {
+    /// The value is exactly this string.
+    pub fn is(value: impl Into<String>) -> Value {
+        Value::Is(value.into())
+    }
+
+    /// The value is one of these strings.
+    pub fn one_of(values: impl IntoIterator<Item = impl Into<String>>) -> Value {
+        Value::OneOf(values.into_iter().map(Into::into).collect())
+    }
+}
+
 /// A constraint on the value half of a key-value tag.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -236,6 +301,51 @@ pub fn contains(m: Match) -> Query {
     Query::Contains(m)
 }
 
+/// An item carrying a [`PlainTag`] whose content is this string.
+///
+/// Shorthand for `contains(Match::exact(s))`.
+///
+/// [`PlainTag`]: crate::tag::PlainTag
+pub fn exact(s: impl Into<String>) -> Query {
+    contains(Match::exact(s))
+}
+
+/// An item carrying a [`KeyValueTag`] with this key.
+///
+/// Shorthand for `contains(Match::has_key(key))`.
+///
+/// [`KeyValueTag`]: crate::tag::KeyValueTag
+pub fn has_key(key: impl Into<String>) -> Query {
+    contains(Match::has_key(key))
+}
+
+/// An item carrying a [`KeyValueTag`] with this key and a matching value.
+///
+/// Shorthand for `contains(Match::key_value(key, value))`.
+///
+/// [`KeyValueTag`]: crate::tag::KeyValueTag
+pub fn key_value(key: impl Into<String>, value: Value) -> Query {
+    contains(Match::key_value(key, value))
+}
+
+/// An item carrying a [`MultipartTag`] with exactly these parts.
+///
+/// Shorthand for `contains(Match::path(parts))`.
+///
+/// [`MultipartTag`]: crate::tag::MultipartTag
+pub fn path(parts: impl IntoIterator<Item = impl Into<String>>) -> Query {
+    contains(Match::path(parts))
+}
+
+/// An item carrying a [`MultipartTag`] starting with these parts.
+///
+/// Shorthand for `contains(Match::prefix(parts))`.
+///
+/// [`MultipartTag`]: crate::tag::MultipartTag
+pub fn prefix(parts: impl IntoIterator<Item = impl Into<String>>) -> Query {
+    contains(Match::prefix(parts))
+}
+
 /// An item satisfying every one of `queries`.
 pub fn all(queries: impl IntoIterator<Item = Query>) -> Query {
     Query::All(queries.into_iter().collect())
@@ -272,4 +382,66 @@ where
     Value::Passes(Predicate::new(move |raw| {
         raw.parse::<T>().map(&f).unwrap_or(false)
     }))
+}
+
+//---------------------------------------------------------------------------
+// Operators
+//
+// `&`, `|` and `!` for queries written by hand. The combinator functions stay for
+// building queries programmatically, where a `Vec` is what you already have.
+//
+// Conjunctions and disjunctions flatten as they're built, so `a & b & c` is one `All` of
+// three rather than nested pairs. That keeps the tree shallow for the evaluator and makes
+// the `Debug` output readable.
+
+impl BitAnd for Query {
+    type Output = Query;
+
+    fn bitand(self, rhs: Query) -> Query {
+        match (self, rhs) {
+            (Query::All(mut left), Query::All(right)) => {
+                left.extend(right);
+                Query::All(left)
+            }
+            (Query::All(mut left), rhs) => {
+                left.push(rhs);
+                Query::All(left)
+            }
+            (lhs, Query::All(mut right)) => {
+                right.insert(0, lhs);
+                Query::All(right)
+            }
+            (lhs, rhs) => Query::All(vec![lhs, rhs]),
+        }
+    }
+}
+
+impl BitOr for Query {
+    type Output = Query;
+
+    fn bitor(self, rhs: Query) -> Query {
+        match (self, rhs) {
+            (Query::Any(mut left), Query::Any(right)) => {
+                left.extend(right);
+                Query::Any(left)
+            }
+            (Query::Any(mut left), rhs) => {
+                left.push(rhs);
+                Query::Any(left)
+            }
+            (lhs, Query::Any(mut right)) => {
+                right.insert(0, lhs);
+                Query::Any(right)
+            }
+            (lhs, rhs) => Query::Any(vec![lhs, rhs]),
+        }
+    }
+}
+
+impl NotOp for Query {
+    type Output = Query;
+
+    fn not(self) -> Query {
+        Query::Not(Box::new(self))
+    }
 }

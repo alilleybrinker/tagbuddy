@@ -14,8 +14,13 @@ use crate::parse::Plain;
 use crate::query::all;
 use crate::query::any;
 use crate::query::contains;
+use crate::query::exact;
+use crate::query::has_key;
+use crate::query::key_value;
 use crate::query::not;
 use crate::query::parses_to;
+use crate::query::path;
+use crate::query::prefix;
 use crate::query::Match;
 use crate::query::Query;
 use crate::query::Value;
@@ -45,10 +50,6 @@ impl<'brand> Tagged<PlainTag<'brand>> for Item<'brand> {
     fn get_tags(&self) -> Self::TagIter<'_> {
         self.tags.iter()
     }
-}
-
-fn exact(s: &str) -> Query {
-    contains(Match::Exact(s.to_owned()))
 }
 
 /// Names of the matching items, scanned.
@@ -205,31 +206,19 @@ fn key_value_queries_use_keys_and_values() {
     };
 
     // Key presence.
-    assert_eq!(
-        names(&contains(Match::HasKey("score".to_owned()))),
-        ["a", "b"]
-    );
+    assert_eq!(names(&has_key("score")), ["a", "b"]);
 
     // Exact value.
-    let score_is_5 = contains(Match::KeyValue {
-        key: "score".to_owned(),
-        value: Value::Is("5".to_owned()),
-    });
+    let score_is_5 = key_value("score", Value::is("5"));
     assert_eq!(names(&score_is_5), ["a"]);
 
     // Set of values.
-    let lang_either = contains(Match::KeyValue {
-        key: "lang".to_owned(),
-        value: Value::OneOf(vec!["rust".to_owned(), "go".to_owned()]),
-    });
+    let lang_either = key_value("lang", Value::one_of(["rust", "go"]));
     assert_eq!(names(&lang_either), ["a", "c"]);
 
     // Parsed value with a constraint on the parsed type -- the case a closed set of
     // variants can't express.
-    let high_score = contains(Match::KeyValue {
-        key: "score".to_owned(),
-        value: parses_to(|n: u32| n > 3),
-    });
+    let high_score = key_value("score", parses_to(|n: u32| n > 3));
     assert_eq!(names(&high_score), ["a"]);
 
     // Index and scan agree on all of the above, including the opaque predicate.
@@ -292,30 +281,22 @@ fn multipart_queries_match_paths_and_prefixes() {
         manager.select(&items).matching(q).map(|i| i.name).collect()
     };
 
-    let path = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
-
     // Prefix matches everything beneath it.
-    assert_eq!(names(&contains(Match::Prefix(path(&["lotr"])))), ["a", "b"]);
+    assert_eq!(names(&prefix(["lotr"])), ["a", "b"]);
 
     // A full path matches only the tag that is exactly it.
-    assert_eq!(
-        names(&contains(Match::Path(path(&["lotr", "gimli"])))),
-        ["b"]
-    );
+    assert_eq!(names(&path(["lotr", "gimli"])), ["b"]);
 
     // A prefix that is also a full path doesn't match the shorter tag's parent.
-    assert_eq!(
-        names(&contains(Match::Path(path(&["lotr"])))),
-        [] as [&str; 0]
-    );
+    assert_eq!(names(&path(["lotr"])), [] as [&str; 0]);
 
     // An empty prefix matches every multipart tag.
-    assert_eq!(names(&contains(Match::Prefix(vec![]))), ["a", "b", "c"]);
+    assert_eq!(names(&prefix(Vec::<&str>::new())), ["a", "b", "c"]);
 
     for query in [
-        contains(Match::Prefix(path(&["lotr"]))),
-        contains(Match::Path(path(&["lotr", "gimli"]))),
-        contains(Match::Prefix(vec![])),
+        prefix(["lotr"]),
+        path(["lotr", "gimli"]),
+        prefix(Vec::<&str>::new()),
     ] {
         let from_index: Vec<_> = manager
             .index(&items)
@@ -459,7 +440,7 @@ fn scan_and_index_agree() {
     let leaves: Vec<Query> = vocabulary
         .iter()
         .chain(["never-interned"].iter())
-        .map(|w| exact(w))
+        .map(|w| exact(*w))
         .collect();
 
     let mut queries = vec![Query::Anything, all([]), any([])];
@@ -473,13 +454,13 @@ fn scan_and_index_agree() {
             queries.push(any([a.clone(), b.clone()]));
             queries.push(all([a.clone(), not(b.clone())]));
             queries.push(not(any([a.clone(), b.clone()])));
-            queries.push(contains(Match::Any(vec![
-                Match::Exact(leaf_text(a)),
-                Match::Exact(leaf_text(b)),
+            queries.push(contains(Match::any_of([
+                Match::exact(leaf_text(a)),
+                Match::exact(leaf_text(b)),
             ])));
-            queries.push(contains(Match::All(vec![
-                Match::Exact(leaf_text(a)),
-                Match::Exact(leaf_text(b)),
+            queries.push(contains(Match::all_of([
+                Match::exact(leaf_text(a)),
+                Match::exact(leaf_text(b)),
             ])));
         }
     }
@@ -635,4 +616,54 @@ fn exact_only_matches_plain_tags() {
             .collect();
         assert_eq!(from_index, names(&query), "index disagreed with scan");
     }
+}
+
+#[test]
+fn operators_build_the_same_queries_as_the_combinators() {
+    make_guard!(guard);
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(DefaultStorage::fresh(guard))
+        .build();
+
+    let tag = |s: &str| manager.parse_tag(s).expect("parses");
+
+    let items = vec![
+        Item {
+            name: "a",
+            tags: vec![tag("rust"), tag("systems")],
+        },
+        Item {
+            name: "b",
+            tags: vec![tag("rust"), tag("web")],
+        },
+        Item {
+            name: "c",
+            tags: vec![tag("go")],
+        },
+    ];
+
+    // `rust` but not `web`, written both ways.
+    let with_ops = exact("rust") & !exact("web");
+    let with_fns = all([exact("rust"), not(exact("web"))]);
+    assert_eq!(scanned(&manager, &items, &with_ops), ["a"]);
+    assert_eq!(
+        scanned(&manager, &items, &with_ops),
+        scanned(&manager, &items, &with_fns)
+    );
+
+    let either = exact("go") | exact("systems");
+    assert_eq!(scanned(&manager, &items, &either), ["a", "c"]);
+
+    // Chains flatten rather than nesting, so the tree stays shallow.
+    let three = exact("a") & exact("b") & exact("c");
+    assert!(matches!(three, Query::All(ref qs) if qs.len() == 3));
+
+    let three_or = exact("a") | exact("b") | exact("c");
+    assert!(matches!(three_or, Query::Any(ref qs) if qs.len() == 3));
+
+    // Mixing still nests where it has to: `&` inside `|` stays a distinct node.
+    let mixed = exact("rust") & (exact("web") | exact("systems"));
+    assert_eq!(scanned(&manager, &items, &mixed), ["a", "b"]);
+    assert_eq!(indexed(&manager, &items, &mixed), ["a", "b"]);
 }

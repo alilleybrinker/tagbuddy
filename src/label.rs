@@ -15,16 +15,16 @@ use crate::TagManager;
 /// [`TagManager`] is never resolved through another [`TagManager`] (which might
 /// succeed but produce incorrect or nonsensical results at runtime if permitted).
 ///
-/// # Safety
+/// # Not `unsafe`
 ///
-/// Note that the usage of [`Label`] types in this crate never actually instantiates
-/// any value of that type, and in general we recommend using a zero-sized type
-/// (this is what's done by the [`generate_label`] macro).
+/// This used to be an `unsafe` trait, hinting at an obligation it never quite had: that a
+/// label be used with only one interner. Nothing about implementing it could break a
+/// safety guarantee, and the obligation it gestured at is now [`Storage`]'s brand, which
+/// enforces it at compile time rather than asking implementors to be careful. So the trait
+/// is safe, and [`generate_label`] is a convenience rather than a safety measure.
 ///
-/// There aren't actual safety concerns around its use, and no choice to implement
-/// or not implement this marker trait can actually break safety guarantees of the
-/// crate, but it's marked `unsafe` to hint toward the special guarantees around
-/// the marker trait and encourage its construction through [`generate_label`].
+/// A label is never instantiated, so a zero-sized type is the sensible choice, which is
+/// what [`generate_label`] produces.
 ///
 /// # `Send` and `Sync`
 ///
@@ -36,7 +36,7 @@ use crate::TagManager;
 /// by [`generate_label`] satisfies it automatically.
 ///
 /// [`PhantomData`]: std::marker::PhantomData
-pub unsafe trait Label: Copy + Send + Sync {}
+pub trait Label: Copy + Send + Sync {}
 
 /// Generate a new type implementing [`Label`].
 ///
@@ -62,7 +62,7 @@ macro_rules! generate_label {
         $( #[$($attrss)*] )*
         #[derive(Debug, Copy, Clone)]
         $visibility struct $struct_name;
-        unsafe impl $crate::label::Label for $struct_name {}
+        impl $crate::label::Label for $struct_name {}
     };
 }
 

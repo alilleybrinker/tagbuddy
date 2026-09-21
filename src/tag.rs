@@ -80,7 +80,12 @@ pub trait Tag<'brand> {
     type Key: Key + Hash;
 
     /// Get the [`TagKind`] of the current tag.
-    fn kind(&self) -> TagKind;
+    ///
+    /// Defaulted from [`Tag::parts`], which already knows the shape. Override it only if
+    /// a tag can report a kind its parts don't imply.
+    fn kind(&self) -> TagKind {
+        self.parts().kind()
+    }
 
     /// Get a structured view of the [`Key`]s this tag holds.
     ///
@@ -126,13 +131,6 @@ where
         match self {
             Either::Left(t) => t.resolve(storage, key_value_separator, path_separator),
             Either::Right(t) => t.resolve(storage, key_value_separator, path_separator),
-        }
-    }
-
-    fn kind(&self) -> TagKind {
-        match self {
-            Either::Left(t) => t.kind(),
-            Either::Right(t) => t.kind(),
         }
     }
 
@@ -200,10 +198,6 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for PlainTag<'brand, L, K> {
         H: BuildHasher + Clone,
     {
         self.resolve(storage)
-    }
-
-    fn kind(&self) -> TagKind {
-        TagKind::Plain
     }
 
     fn parts(&self) -> TagParts<'_, Self::Key> {
@@ -282,10 +276,6 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for KeyValueTag<'brand, L, K> 
         H: BuildHasher + Clone,
     {
         self.resolve(storage, key_value_separator, path_separator)
-    }
-
-    fn kind(&self) -> TagKind {
-        TagKind::KeyValue
     }
 
     fn parts(&self) -> TagParts<'_, Self::Key> {
@@ -383,10 +373,6 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for MultipartTag<'brand, L, K>
         H: BuildHasher + Clone,
     {
         self.resolve(storage, key_value_separator, path_separator)
-    }
-
-    fn kind(&self) -> TagKind {
-        TagKind::Multipart
     }
 
     fn parts(&self) -> TagParts<'_, Self::Key> {

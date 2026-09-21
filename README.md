@@ -41,7 +41,7 @@ over an item; `Match` is a predicate over a single tag.
 ```rust
 use tagbuddy::brand::make_guard;
 use tagbuddy::parse::Plain;
-use tagbuddy::query::{all, contains, not, Match};
+use tagbuddy::query::exact;
 use tagbuddy::storage::DefaultStorage;
 use tagbuddy::tag::{PlainTag, Tagged};
 use tagbuddy::TagManager;
@@ -67,12 +67,10 @@ let posts = vec![
     Post { title: "two", tags: vec![tag("rust")] },
 ];
 
-let exact = |s: &str| contains(Match::Exact(s.to_owned()));
-
 // Tagged `rust` but not `web`.
 let found: Vec<_> = manager
     .select(&posts)
-    .matching(&all([exact("rust"), not(exact("web"))]))
+    .matching(&(exact("rust") & !exact("web")))
     .map(|post| post.title)
     .collect();
 
@@ -84,11 +82,18 @@ with `Storage::get`, which does *not* intern — so a query can't permanently ad
 its own search terms to the append-only storage it is searching, and a term that
 was never interned short-circuits to "matches nothing".
 
-Besides `Match::Exact` for plain tags there are `HasKey` and `KeyValue` for
-key-value tags, `Path` and `Prefix` for multipart tags, and `Any`/`All` to
-combine matches within a single tag. Value constraints cover an exact value, a
+Besides `exact` for plain tags there are `has_key` and `key_value` for key-value
+tags, `path` and `prefix` for multipart tags, and `Match::all_of`/`Match::any_of`
+to combine matches within a single tag. Value constraints cover an exact value, a
 set of them, a regex, and an arbitrary predicate — including `parses_to`, for
-"parses into this type and then satisfies this".
+"parses into this type and then satisfies this":
+
+```rust,ignore
+key_value("score", parses_to(|n: u32| n > 3)) | has_key("featured")
+```
+
+Queries combine with `&`, `|` and `!`, or with the `all`, `any` and `not`
+functions when building them programmatically.
 
 Each match targets one shape of tag, so `Match::Exact` never matches a key-value
 or multipart tag even when that tag's text is exactly the string given:
