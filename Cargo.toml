@@ -3,6 +3,10 @@ name = "tagbuddy"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# Set by `generativity`, which uses edition 2024 and so needs 1.85. Nothing in
+# this crate's own code requires anything that recent -- GATs, the newest feature
+# it relies on, have been stable since 1.65.
+rust-version = "1.85"
 
 
 #============================================================================

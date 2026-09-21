@@ -7,6 +7,13 @@
 //! This crate defines a set of mechanisms for generically parsing, storing,
 //! comparing, and querying sets of tags according to configured policies.
 
+/// Compiles the code blocks in `README.md` as doctests, so the README's examples
+/// can't drift from the API. `cfg(doctest)` keeps it out of real builds and out of
+/// the rendered docs.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 pub mod brand {
     //! Compile-time identity for a single [`Storage`].
     //!

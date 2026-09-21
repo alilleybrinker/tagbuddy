@@ -4,6 +4,7 @@ use crate::error::ParseError;
 #[cfg(feature = "either")]
 use crate::label::Label;
 use crate::parse::Parser;
+#[cfg(feature = "either")]
 use crate::storage::Key;
 use crate::storage::Storage;
 use crate::tag::KeyValueSep;

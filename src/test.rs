@@ -12,13 +12,16 @@ use crate::storage::Interner;
 use crate::storage::Key;
 use crate::storage::Spur;
 use crate::storage::Storage;
+#[cfg(feature = "convert_case")]
 use crate::tag::KeyValueSep;
 use crate::tag::KeyValueTag;
 use crate::tag::MultipartTag;
 use crate::tag::PathSep;
 use crate::tag::Tag;
+#[cfg(all(feature = "convert_case", feature = "either"))]
 use crate::tag::TagKind;
 use crate::TagManager;
+#[cfg(all(feature = "convert_case", feature = "either"))]
 use anyhow::anyhow as err;
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;

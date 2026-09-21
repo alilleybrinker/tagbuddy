@@ -36,6 +36,24 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Kept in step with `rust-version` in Cargo.toml. The floor comes from
+      # `generativity`, which uses edition 2024.
+      - uses: dtolnay/rust-toolchain@1.85
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --all-features
+
+      - name: Check without default features
+        run: cargo check --no-default-features
+
   features:
     name: Feature combinations
     runs-on: ubuntu-latest
@@ -58,6 +76,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Every adapter is feature-gated, so each combination needs to build and
-      # test on its own; the default set alone doesn't exercise them.
+      # test on its own; the default set alone doesn't exercise them. Warnings are
+      # denied here too: the `check` job only covers `--all-features`, so an import
+      # left unused when a feature is off shows up in no other job.
       - name: Test with features "${{ matrix.features }}"
         run: cargo test --no-default-features --features "${{ matrix.features }}"
+        env:
+          RUSTFLAGS: -D warnings
