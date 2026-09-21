@@ -7,6 +7,7 @@ use crate::parse::*;
 use crate::storage::Storage;
 use crate::tag::KeyValueSep;
 use crate::tag::KeyValueTag;
+use crate::tag::MultipartTag;
 use crate::tag::PathSep;
 use crate::tag::Tag;
 use crate::tag::TagKind;
@@ -296,4 +297,57 @@ fn batch_parse_reports_per_tag_errors() {
     assert!(results[0].is_ok());
     assert!(matches!(results[1], Err(ParseError::MissingValue)));
     assert!(results[2].is_ok());
+}
+
+// Helper to build a multipart manager with the default separator and the given policy.
+fn multipart_manager(
+    policy: MultipartPolicy,
+) -> TagManager<DefaultLabel, DefaultSymbol, MultipartTag, Multipart> {
+    TagManager::builder()
+        .parser(Multipart::new(policy))
+        .storage(Storage::default())
+        .build()
+}
+
+#[test]
+fn multipart_tag_rejects_empty_parts() {
+    // Interior, leading, trailing, and a bare separator, under both policies.
+    let inputs = ["a//b", "/a", "a/", "/", "a//", "//a"];
+
+    for policy in [
+        MultipartPolicy::PermitOnePart,
+        MultipartPolicy::RequireMultipart,
+    ] {
+        let manager = multipart_manager(policy);
+
+        for input in inputs {
+            assert!(
+                matches!(manager.parse_tag(input), Err(ParseError::EmptyPart)),
+                "{policy:?} should reject {input:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn multipart_tag_accepts_non_empty_parts() -> Result<()> {
+    let manager = multipart_manager(MultipartPolicy::RequireMultipart);
+
+    test_roundtrip(&manager, "a/b")?;
+    test_roundtrip(&manager, "lotr/legolas/friends")?;
+
+    Ok(())
+}
+
+#[test]
+fn multipart_tag_single_part_still_depends_on_policy() -> Result<()> {
+    // A single part is not an *empty* part, so the policy still decides.
+    test_roundtrip(&multipart_manager(MultipartPolicy::PermitOnePart), "solo")?;
+
+    assert!(matches!(
+        multipart_manager(MultipartPolicy::RequireMultipart).parse_tag("solo"),
+        Err(ParseError::SinglePartMultipart)
+    ));
+
+    Ok(())
 }

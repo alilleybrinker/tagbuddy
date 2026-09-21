@@ -48,6 +48,12 @@ pub enum ParseError {
     /// Tried to parse a single-part [`MultipartTag`].
     SinglePartMultipart,
 
+    /// Tried to parse a [`MultipartTag`] with an empty part.
+    ///
+    /// A tag like `"a//b"`, `"/a"`, or `"a/"` has an empty part between or
+    /// beside its separators.
+    EmptyPart,
+
     #[cfg_attr(feature = "either", doc = "Failed an [`Or`] match.")]
     #[cfg_attr(not(feature = "either"), doc = "Failed an `Or` match.")]
     FailedOr(Box<ParseError>, Box<ParseError>),
@@ -78,6 +84,7 @@ impl Display for ParseError {
             ParseError::SinglePartMultipart => {
                 write!(f, "can't accept a single-part multipart tag")
             }
+            ParseError::EmptyPart => write!(f, "empty part in a multipart tag"),
             ParseError::FailedOr(e1, e2) => {
                 write!(f, "failed two parsers with errors '{e1}' and '{e2}'")
             }

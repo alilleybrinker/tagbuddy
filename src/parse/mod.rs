@@ -220,6 +220,20 @@ fn check_key_value(key: &str, value: &str) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// Validate that no part of a multipart tag is empty, error out if any is.
+///
+/// Like `check_key_value`, this catches what `check_empty` can't: a tag such as
+/// `"a//b"`, `"/a"`, or `"a/"` isn't empty itself, but has an empty part.
+fn check_parts<'part>(parts: impl Iterator<Item = &'part str>) -> Result<(), ParseError> {
+    for part in parts {
+        if part.is_empty() {
+            return Err(ParseError::EmptyPart);
+        }
+    }
+
+    Ok(())
+}
+
 parsers! {
     /// No internal structure; the whole tag is interned as-is.
     Plain {} => PlainTag {
@@ -258,18 +272,15 @@ parsers! {
     /// Multipart parser, splits parts on separator, `'/'` default separator.
     Multipart { policy: MultipartPolicy } => MultipartTag {
         |this: &Multipart<L, S>, interner, _key_value_separator, path_separator: PathSep, raw: &str| {
-            match this.policy {
-                MultipartPolicy::PermitOnePart => Ok(MultipartTag::new(interner, raw.split(path_separator.0))),
-                MultipartPolicy::RequireMultipart => {
-                    let parts = raw.split(path_separator.0);
+            let parts = raw.split(path_separator.0);
 
-                    if parts.clone().count() < 2 {
-                        return Err(ParseError::SinglePartMultipart);
-                    }
-
-                    Ok(MultipartTag::new(interner, parts))
-                },
+            if this.policy == MultipartPolicy::RequireMultipart && parts.clone().count() < 2 {
+                return Err(ParseError::SinglePartMultipart);
             }
+
+            check_parts(parts.clone())?;
+
+            Ok(MultipartTag::new(interner, parts))
         }
     }
 }
