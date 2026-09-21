@@ -7,7 +7,6 @@ use crate::parse::Parser;
 use crate::storage::StorageLock;
 use crate::tag::KeyValueSep;
 use crate::tag::PathSep;
-#[cfg(feature = "either")]
 use crate::tag::Tag;
 #[cfg(feature = "convert_case")]
 pub use convert_case::Case;
@@ -178,8 +177,10 @@ adapters! {
 ///
 /// This is automatically implemented for any type that implements both
 /// `regex::Replacer` and [`Clone`].
+#[cfg(feature = "regex")]
 pub trait CloneableReplacer: Replacer + Clone {}
 
+#[cfg(feature = "regex")]
 impl<T: Replacer + Clone> CloneableReplacer for T {}
 
 // The `Or` adapter is implemented by hand, because making the adapter-generating
@@ -274,7 +275,14 @@ pub enum TrimBounds {
     End,
 }
 
-/// Sets how many replacements should be done when using the [`Replace`] adapter.
+#[cfg_attr(
+    feature = "regex",
+    doc = "Sets how many replacements should be done when using the [`Replace`] adapter."
+)]
+#[cfg_attr(
+    not(feature = "regex"),
+    doc = "Sets how many replacements should be done when using the `Replace` adapter."
+)]
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 pub enum ReplaceCount {
     /// Replace just the first instance of the regex match.

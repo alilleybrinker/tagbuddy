@@ -1,6 +1,6 @@
 //! Errors for producing and consuming tags.
 
-#[cfg(doc)]
+#[cfg(all(doc, feature = "either"))]
 use crate::parse::Or;
 #[cfg(doc)]
 use crate::storage::Storage;
@@ -48,7 +48,8 @@ pub enum ParseError {
     /// Tried to parse a single-part [`MultipartTag`].
     SinglePartMultipart,
 
-    /// Failed an [`Or`] match.
+    #[cfg_attr(feature = "either", doc = "Failed an [`Or`] match.")]
+    #[cfg_attr(not(feature = "either"), doc = "Failed an `Or` match.")]
     FailedOr(Box<ParseError>, Box<ParseError>),
 
     /// An underlying storage error arose.
@@ -142,7 +143,11 @@ impl StdError for ResolveError {
 }
 
 /// Errors arising when interacting with [`Storage`]s.
-#[derive(Debug)]
+///
+/// This is [`Copy`] so that batch operations, which take the storage lock once
+/// up front, can report the same failure for every element they were asked to
+/// handle.
+#[derive(Debug, Copy, Clone)]
 #[non_exhaustive]
 pub enum StorageError {
     /// Failed to lock the storage, likely because the [`Mutex`] is poisoned.

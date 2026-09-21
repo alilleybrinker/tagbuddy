@@ -1,15 +1,19 @@
 //! Tests for the crate's APIs.
 
+use crate::error::ParseError;
+use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::parse::*;
 use crate::storage::Storage;
 use crate::tag::KeyValueSep;
+use crate::tag::KeyValueTag;
 use crate::tag::PathSep;
 use crate::tag::Tag;
 use crate::tag::TagKind;
 use crate::TagManager;
 use anyhow::anyhow as err;
 use anyhow::Result;
+use string_interner::DefaultSymbol;
 use string_interner::Symbol;
 
 // Helper function to test that a tag that's parsed and then resolved
@@ -39,6 +43,7 @@ fn roundtrip_plain_tag() -> Result<()> {
 }
 
 #[test]
+#[cfg(feature = "convert_case")]
 fn transform_tag() -> Result<()> {
     let parser = Trim(
         TrimBounds::Both,
@@ -152,6 +157,7 @@ fn roundtrip_multipart_tag() -> Result<()> {
 }
 
 #[test]
+#[cfg(all(feature = "convert_case", feature = "either"))]
 fn complex_parser() -> Result<()> {
     let manager = TagManager::builder()
         .parser(Trim(
@@ -182,4 +188,112 @@ fn complex_parser() -> Result<()> {
     assert_eq!(t3.1, TagKind::Plain);
 
     Ok(())
+}
+
+// Helper to build a key-value manager with the default separator and the given policy.
+fn key_value_manager(
+    policy: KvPolicy,
+) -> TagManager<DefaultLabel, DefaultSymbol, KeyValueTag, KeyValue> {
+    TagManager::builder()
+        .parser(KeyValue::new(policy))
+        .storage(Storage::default())
+        .build()
+}
+
+#[test]
+fn key_value_tag_rejects_empty_key() {
+    for policy in [
+        KvPolicy::NoAmbiguousSep,
+        KvPolicy::SplitOnFirstSep,
+        KvPolicy::SplitOnLastSep,
+    ] {
+        let manager = key_value_manager(policy);
+        assert!(
+            matches!(manager.parse_tag(":world"), Err(ParseError::MissingKey)),
+            "{policy:?} should reject an empty key"
+        );
+    }
+}
+
+#[test]
+fn key_value_tag_rejects_empty_value() {
+    for policy in [
+        KvPolicy::NoAmbiguousSep,
+        KvPolicy::SplitOnFirstSep,
+        KvPolicy::SplitOnLastSep,
+    ] {
+        let manager = key_value_manager(policy);
+        assert!(
+            matches!(manager.parse_tag("hello:"), Err(ParseError::MissingValue)),
+            "{policy:?} should reject an empty value"
+        );
+    }
+}
+
+#[test]
+fn key_value_tag_rejects_separator_only() {
+    for policy in [
+        KvPolicy::NoAmbiguousSep,
+        KvPolicy::SplitOnFirstSep,
+        KvPolicy::SplitOnLastSep,
+    ] {
+        let manager = key_value_manager(policy);
+        assert!(
+            matches!(manager.parse_tag(":"), Err(ParseError::MissingKey)),
+            "{policy:?} should reject a bare separator"
+        );
+    }
+}
+
+#[test]
+fn key_value_tag_missing_separator_is_missing_value() {
+    for policy in [
+        KvPolicy::NoAmbiguousSep,
+        KvPolicy::SplitOnFirstSep,
+        KvPolicy::SplitOnLastSep,
+    ] {
+        let manager = key_value_manager(policy);
+        assert!(
+            matches!(manager.parse_tag("hello"), Err(ParseError::MissingValue)),
+            "{policy:?} should report a missing value when there's no separator"
+        );
+    }
+}
+
+#[test]
+fn key_value_tag_still_rejects_ambiguous_separators() {
+    let manager = key_value_manager(KvPolicy::NoAmbiguousSep);
+    assert!(matches!(
+        manager.parse_tag("hello:world:today"),
+        Err(ParseError::AmbiguousKeyValueTag)
+    ));
+}
+
+#[test]
+fn batch_parse_and_resolve_roundtrip() -> Result<()> {
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(Storage::default())
+        .build();
+
+    let inputs = ["hello", "world", "today"];
+
+    // Both of these take the storage lock exactly once, for the whole batch.
+    let tags: Vec<_> = manager.parse_tags_into::<Result<Vec<_>, _>>(inputs)?;
+    let resolved: Vec<String> = manager.resolve_tags_into::<Result<Vec<_>, _>>(&tags)?;
+
+    assert_eq!(resolved, inputs);
+
+    Ok(())
+}
+
+#[test]
+fn batch_parse_reports_per_tag_errors() {
+    let manager = key_value_manager(KvPolicy::NoAmbiguousSep);
+
+    let results: Vec<_> = manager.parse_tags_into::<Vec<_>>(["good:tag", "bad", "also:good"]);
+
+    assert!(results[0].is_ok());
+    assert!(matches!(results[1], Err(ParseError::MissingValue)));
+    assert!(results[2].is_ok());
 }

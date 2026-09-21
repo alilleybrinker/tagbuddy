@@ -430,6 +430,10 @@ pub enum TagKind {
     Multipart,
 
     /// A type of [`Tag`] not otherwise known.
+    ///
+    /// No [`Tag`] defined by this crate reports this kind; it's here for
+    /// downstream [`Tag`] implementations which aren't plain, key-value,
+    /// or multipart.
     Other,
 }
 

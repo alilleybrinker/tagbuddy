@@ -204,8 +204,24 @@ fn check_empty(raw: &str) -> Result<(), ParseError> {
         .ok_or(ParseError::EmptyTag)
 }
 
+/// Validate that neither side of a key-value tag is empty, error out if either is.
+///
+/// `check_empty` only rejects a wholly-empty raw tag, so a tag like `"key:"` or
+/// `":value"` reaches the key-value parser with one side empty.
+fn check_key_value(key: &str, value: &str) -> Result<(), ParseError> {
+    if key.is_empty() {
+        return Err(ParseError::MissingKey);
+    }
+
+    if value.is_empty() {
+        return Err(ParseError::MissingValue);
+    }
+
+    Ok(())
+}
+
 parsers! {
-    /// No internal structure, `':'` default separator.
+    /// No internal structure; the whole tag is interned as-is.
     Plain {} => PlainTag {
         |_this, interner, _key_value_separator, _path_separator, raw| Ok(PlainTag::new(interner, raw))
     }
@@ -213,33 +229,33 @@ parsers! {
     /// Key-value parser, `':'` default separator.
     KeyValue { policy: KvPolicy } => KeyValueTag {
         |this: &KeyValue<L, S>, interner, key_value_separator: KeyValueSep, _path_separator, raw: &str| {
-            match this.policy {
+            let (key, value) = match this.policy {
                 KvPolicy::NoAmbiguousSep => {
-                    let mut parts_iter = raw.split(key_value_separator.0);
-                    let key = parts_iter.next().ok_or(ParseError::MissingKey)?;
-                    let value = parts_iter.next().ok_or(ParseError::MissingValue)?;
-                    match parts_iter.next() {
-                        Some(_) => Err(ParseError::AmbiguousKeyValueTag),
-                        None => Ok(KeyValueTag::new(interner, key, value))
+                    let (key, value) = raw
+                        .split_once(key_value_separator.0)
+                        .ok_or(ParseError::MissingValue)?;
+
+                    if value.contains(key_value_separator.0) {
+                        return Err(ParseError::AmbiguousKeyValueTag);
                     }
+
+                    (key, value)
                 }
                 KvPolicy::SplitOnFirstSep => {
-                    match raw.split_once(key_value_separator.0) {
-                        None => Err(ParseError::MissingValue),
-                        Some((key, value)) => Ok(KeyValueTag::new(interner, key, value)),
-                    }
+                    raw.split_once(key_value_separator.0).ok_or(ParseError::MissingValue)?
                 }
                 KvPolicy::SplitOnLastSep => {
-                    match raw.rsplit_once(key_value_separator.0) {
-                        None => Err(ParseError::MissingValue),
-                        Some((key, value)) => Ok(KeyValueTag::new(interner, key, value)),
-                    }
+                    raw.rsplit_once(key_value_separator.0).ok_or(ParseError::MissingValue)?
                 }
-            }
+            };
+
+            check_key_value(key, value)?;
+
+            Ok(KeyValueTag::new(interner, key, value))
         }
     }
 
-    /// Multipart parser, splits parts on separator, `':'` default separator.
+    /// Multipart parser, splits parts on separator, `'/'` default separator.
     Multipart { policy: MultipartPolicy } => MultipartTag {
         |this: &Multipart<L, S>, interner, _key_value_separator, path_separator: PathSep, raw: &str| {
             match this.policy {
@@ -258,18 +274,12 @@ parsers! {
     }
 }
 
-/* # SAFETY
+/* # NOTE
  *
- * There's no data to sync for any of these; the only fields involved
- * are read-only once the type is created (they just set configuration).
- * Since there's nothing to sync, there's no worry about deriving this.
+ * `Plain`, `KeyValue`, and `Multipart` deliberately have no hand-written `Send`
+ * and `Sync` impls. Their only fields are `PhantomData` and read-only
+ * configuration, so the compiler derives both for any label and symbol that are
+ * themselves `Send`/`Sync` — which every label built by `generate_label` is,
+ * being a unit struct. An `unsafe impl` here would only serve to paper over a
+ * label that isn't.
  */
-
-unsafe impl<L: Label, S: Symbol> Send for Plain<L, S> {}
-unsafe impl<L: Label, S: Symbol> Sync for Plain<L, S> {}
-
-unsafe impl<L: Label, S: Symbol> Send for KeyValue<L, S> {}
-unsafe impl<L: Label, S: Symbol> Sync for KeyValue<L, S> {}
-
-unsafe impl<L: Label, S: Symbol> Send for Multipart<L, S> {}
-unsafe impl<L: Label, S: Symbol> Sync for Multipart<L, S> {}

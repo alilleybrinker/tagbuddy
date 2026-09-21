@@ -1,4 +1,3 @@
-
 pub mod blog {
     use anyhow::Result;
     use std::iter::once as iter_once;
@@ -28,6 +27,12 @@ pub mod blog {
         posts: Vec<BlogPost>,
         tag_manager: PostTagsManager,
         rating_manager: PostRatingsManager,
+    }
+
+    impl Default for Blog {
+        fn default() -> Self {
+            Blog::new()
+        }
     }
 
     impl Blog {
@@ -63,7 +68,7 @@ pub mod blog {
 
             let tags = self
                 .tag_manager
-                .parse_tags_into::<StdResult<_, _>>(tags.into_iter().map(|t| *t))?;
+                .parse_tags_into::<StdResult<_, _>>(tags.iter().copied())?;
 
             let rating = self.rating_manager.parse_tag(rating)?;
 

@@ -1,6 +1,8 @@
 //! Produce and resolve tags.
 
 use crate::error::ResolveError;
+#[cfg(doc)]
+use crate::error::StorageError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::parse::*;
@@ -165,6 +167,12 @@ impl<
     ///
     /// Note this can perform strictly better than `parse_tag`, because it takes the lock on the
     /// storage before starting to parse _any_ tags, and holds it for the duration.
+    ///
+    /// Because the lock is held for the whole iteration, `src` must not itself try to access
+    /// this [`TagManager`]'s [`Storage`] as it's iterated; doing so would deadlock.
+    ///
+    /// If the lock can't be taken at all, every element of the resulting collection is that
+    /// [`StorageError`].
     pub fn parse_tags_into_with<'raw, O, C>(
         &self,
         src: impl IntoIterator<Item = &'raw str>,
@@ -173,11 +181,16 @@ impl<
     where
         C: FromIterator<Result<O, ParseError>>,
     {
+        let mut storage = match self.storage.lock() {
+            Ok(storage) => storage,
+            Err(err) => return src.into_iter().map(|_| Err(err.into())).collect(),
+        };
+
         src.into_iter()
             .map(move |raw| {
                 self.parser
                     .parse(
-                        &mut self.storage.lock()?,
+                        &mut storage,
                         self.key_value_separator,
                         self.path_separator,
                         raw,
@@ -215,6 +228,12 @@ impl<
     ///
     /// Note this can perform strictly better than `resolve_tag` because it takes the storage lock
     /// before beginning iteration, and holds it for the duration.
+    ///
+    /// Because the lock is held for the whole iteration, `src` must not itself try to access
+    /// this [`TagManager`]'s [`Storage`] as it's iterated; doing so would deadlock.
+    ///
+    /// If the lock can't be taken at all, every element of the resulting collection is that
+    /// [`StorageError`].
     pub fn resolve_tags_into_with<'tag, O, C>(
         &self,
         src: impl IntoIterator<Item = &'tag P::Tag>,
@@ -224,14 +243,15 @@ impl<
         P::Tag: 'tag,
         C: FromIterator<Result<O, ResolveError>>,
     {
+        let storage = match self.storage.lock() {
+            Ok(storage) => storage,
+            Err(err) => return src.into_iter().map(|_| Err(err.into())).collect(),
+        };
+
         src.into_iter()
             .map(move |tag| {
-                tag.resolve(
-                    &self.storage.lock()?,
-                    self.key_value_separator,
-                    self.path_separator,
-                )
-                .map(f)
+                tag.resolve(&storage, self.key_value_separator, self.path_separator)
+                    .map(f)
             })
             .collect()
     }
