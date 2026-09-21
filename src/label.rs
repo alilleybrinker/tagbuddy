@@ -3,6 +3,8 @@
 #[cfg(doc)]
 use crate::generate_label;
 #[cfg(doc)]
+use crate::storage::Storage;
+#[cfg(doc)]
 use crate::tag::Tag;
 #[cfg(doc)]
 use crate::TagManager;
@@ -23,7 +25,18 @@ use crate::TagManager;
 /// or not implement this marker trait can actually break safety guarantees of the
 /// crate, but it's marked `unsafe` to hint toward the special guarantees around
 /// the marker trait and encourage its construction through [`generate_label`].
-pub unsafe trait Label: Copy {}
+///
+/// # `Send` and `Sync`
+///
+/// [`Label`]s are required to be [`Send`] and [`Sync`] so that the types carrying
+/// them as [`PhantomData`] — parsers, tags, and [`Storage`] — are too, without
+/// each of those needing a hand-written `unsafe impl` or every generic function
+/// over a label having to repeat the bounds. Since a label is never instantiated,
+/// and is a zero-sized type by convention, this costs nothing: every label built
+/// by [`generate_label`] satisfies it automatically.
+///
+/// [`PhantomData`]: std::marker::PhantomData
+pub unsafe trait Label: Copy + Send + Sync {}
 
 /// Generate a new type implementing [`Label`].
 ///
