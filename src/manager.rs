@@ -1,7 +1,7 @@
 //! Produce and resolve tags.
 
 use crate::error::ParseError;
-use crate::label::DefaultLabel;
+#[cfg(doc)]
 use crate::label::Label;
 use crate::parse::*;
 use crate::query::Index;
@@ -9,7 +9,6 @@ use crate::query::Scan;
 #[cfg(doc)]
 use crate::storage::Interner;
 use crate::storage::Key;
-use crate::storage::Spur;
 use crate::storage::Storage;
 use crate::tag::KeyValueSep;
 #[cfg(doc)]
@@ -17,6 +16,7 @@ use crate::tag::KeyValueTag;
 #[cfg(doc)]
 use crate::tag::MultipartTag;
 use crate::tag::PathSep;
+#[cfg(doc)]
 use crate::tag::PlainTag;
 use crate::tag::Tag;
 use crate::tag::TagKind;
@@ -27,6 +27,15 @@ use std::convert::identity;
 use std::hash::BuildHasher;
 use std::hash::Hash;
 use typed_builder::TypedBuilder;
+
+/// The [`Tag`] type a parser produces.
+pub type TagOf<'brand, P> = <P as Parser<'brand>>::Tag;
+
+/// The [`Label`] of the tags a parser produces.
+pub type LabelOf<'brand, P> = <TagOf<'brand, P> as Tag<'brand>>::Label;
+
+/// The [`Key`] of the tags a parser produces.
+pub type KeyOf<'brand, P> = <TagOf<'brand, P> as Tag<'brand>>::Key;
 
 mod sealed {
     /// Prevents [`ManagerParts`] being implemented outside this crate.
@@ -97,16 +106,19 @@ pub trait ManagerParts: sealed::Sealed {
 /// underlying [`Interner`]. The [`Interner`] may be shared with other
 /// [`TagManager`]s, via [`Storage::share_as`].
 ///
-/// [`TagManager`] is designed to be generic over:
+/// # Parameters
 ///
-/// - The parser used to produce tags.
-/// - The key type and hasher used to store tag data.
+/// Just the parser and the hasher. Everything else follows from the parser: it determines
+/// the [`Tag`] type it produces, which determines that tag's [`Label`] and [`Key`]. So a
+/// manager over plain tags labelled `Tags` is
 ///
-/// The trait bounds on [`TagManager`] ensure that the parser and storage agree
-/// on the [`Key`] used as a handle for the stored string data. This is required
-/// because the parser produces [`Tag`]s which store [`Key`]s so they can later
-/// be resolved back into [`String`]s to recover the full originally-input tag
-/// data.
+/// ```text
+/// TagManager<'brand, Plain<Tags>>
+/// ```
+///
+/// rather than restating the label, key and tag type the parser already implies. Those
+/// projections are available as [`TagOf`], [`LabelOf`] and [`KeyOf`] when you need to name
+/// one, and [`ManagerParts`] bundles them for code generic over a manager.
 ///
 /// Resolving through a [`TagManager`] can't fail. Its [`Storage`] carries a
 /// `'brand`, so a [`Tag`] can only be resolved through the storage that interned
@@ -120,18 +132,9 @@ pub trait ManagerParts: sealed::Sealed {
 /// each part separately, again on the expectation that individual parts will
 /// be frequently repeated across tags, resulting in space savings from interning.
 #[derive(TypedBuilder)]
-pub struct TagManager<
-    'brand,
-    L = DefaultLabel,
-    K = Spur,
-    T = PlainTag<'brand, L, K>,
-    P = Plain<L, K>,
-    H = RandomState,
-> where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
+pub struct TagManager<'brand, P = Plain, H = RandomState>
+where
+    P: Parser<'brand> + Send + Sync,
     H: BuildHasher + Clone,
 {
     /// Defines how key-value tags are parsed, if key-value tags are permitted.
@@ -146,54 +149,44 @@ pub struct TagManager<
     pub(crate) path_separator: PathSep,
 
     /// Interns and stores string data for tags, to reduce memory usage.
-    pub(crate) storage: Storage<'brand, L, K, H>,
+    pub(crate) storage: Storage<'brand, LabelOf<'brand, P>, KeyOf<'brand, P>, H>,
 }
 
-impl<'brand, L, K, T, P, H> sealed::Sealed for TagManager<'brand, L, K, T, P, H>
+impl<'brand, P, H> sealed::Sealed for TagManager<'brand, P, H>
 where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
+    P: Parser<'brand> + Send + Sync,
     H: BuildHasher + Clone,
 {
 }
 
-impl<'brand, L, K, T, P, H> ManagerParts for TagManager<'brand, L, K, T, P, H>
+impl<'brand, P, H> ManagerParts for TagManager<'brand, P, H>
 where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
+    P: Parser<'brand> + Send + Sync,
     H: BuildHasher + Clone,
 {
-    type Key = K;
+    type Key = KeyOf<'brand, P>;
 
-    // `T` carries `'brand` inside itself, so this projects a branded tag type without the
-    // trait having a brand of its own.
-    type Tag = T;
+    // The tag type carries `'brand` inside itself, so this projects a branded tag type
+    // without the trait having a brand of its own.
+    type Tag = TagOf<'brand, P>;
 
-    fn lookup(&self, raw: &str) -> Option<K> {
+    fn lookup(&self, raw: &str) -> Option<Self::Key> {
         self.storage.get(raw)
     }
 
-    fn text(&self, key: K) -> &str {
+    fn text(&self, key: Self::Key) -> &str {
         self.storage.resolve(key)
     }
 
-    fn parts_of(tag: &T) -> TagParts<'_, K> {
+    fn parts_of(tag: &Self::Tag) -> TagParts<'_, Self::Key> {
         tag.parts()
     }
 }
 
-impl<
-        'brand,
-        L: Label,
-        K: Key + Hash,
-        T: Tag<'brand, Label = L, Key = K>,
-        P: Parser<'brand, Tag = T> + Send + Sync,
-        H: BuildHasher + Clone,
-    > TagManager<'brand, L, K, T, P, H>
+impl<'brand, P, H> TagManager<'brand, P, H>
+where
+    P: Parser<'brand> + Send + Sync,
+    H: BuildHasher + Clone,
 {
     /// Attempt to parse a structured tag from the provided "raw" tag.
     ///
@@ -333,13 +326,13 @@ impl<
     /// collection can't change while the index is alive.
     pub fn index<'m, 'items, I>(&'m self, items: &'items [I]) -> Index<'m, 'items, Self, I>
     where
-        I: Tagged<T>,
+        I: Tagged<TagOf<'brand, P>>,
     {
         Index::build(self, items)
     }
 
     /// Get the inner [`Storage`] of the [`TagManager`].
-    pub fn storage(&self) -> &Storage<'brand, L, K, H> {
+    pub fn storage(&self) -> &Storage<'brand, LabelOf<'brand, P>, KeyOf<'brand, P>, H> {
         &self.storage
     }
 

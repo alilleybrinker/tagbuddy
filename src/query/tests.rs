@@ -25,7 +25,6 @@ use crate::query::Match;
 use crate::query::Query;
 use crate::query::Value;
 use crate::storage::DefaultStorage;
-use crate::storage::Spur;
 use crate::tag::PlainTag;
 use crate::tag::Tagged;
 use crate::TagManager;
@@ -54,7 +53,7 @@ impl<'brand> Tagged<PlainTag<'brand>> for Item<'brand> {
 
 /// Names of the matching items, scanned.
 fn scanned<'b>(
-    manager: &TagManager<'b, crate::label::DefaultLabel, Spur, PlainTag<'b>, Plain>,
+    manager: &TagManager<'b, Plain>,
     items: &[Item<'b>],
     query: &Query,
 ) -> Vec<&'static str> {
@@ -67,7 +66,7 @@ fn scanned<'b>(
 
 /// Names of the matching items, from an index.
 fn indexed<'b>(
-    manager: &TagManager<'b, crate::label::DefaultLabel, Spur, PlainTag<'b>, Plain>,
+    manager: &TagManager<'b, Plain>,
     items: &[Item<'b>],
     query: &Query,
 ) -> Vec<&'static str> {

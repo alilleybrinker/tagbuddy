@@ -8,7 +8,7 @@ pub mod blog {
     use tagbuddy::brand::Guard;
     use tagbuddy::generate_label;
     use tagbuddy::parse::*;
-    use tagbuddy::storage::Spur;
+
     use tagbuddy::storage::Storage;
     use tagbuddy::tag::KeyValueTag;
     use tagbuddy::tag::PlainTag;
@@ -20,10 +20,10 @@ pub mod blog {
         pub Ratings {}
     }
 
-    type PostTagsManager<'brand> =
-        TagManager<'brand, Tags, Spur, PlainTag<'brand, Tags>, Plain<Tags>>;
-    type PostRatingsManager<'brand> =
-        TagManager<'brand, Ratings, Spur, KeyValueTag<'brand, Ratings>, KeyValue<Ratings>>;
+    // The parser determines the tag type, which determines the label and key, so naming
+    // the parser is enough.
+    type PostTagsManager<'brand> = TagManager<'brand, Plain<Tags>>;
+    type PostRatingsManager<'brand> = TagManager<'brand, KeyValue<Ratings>>;
 
     pub struct Blog<'brand> {
         posts: Vec<BlogPost<'brand>>,

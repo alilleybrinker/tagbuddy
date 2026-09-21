@@ -51,8 +51,11 @@ pub mod tag;
 #[cfg(test)]
 mod test;
 
+pub use crate::manager::KeyOf;
+pub use crate::manager::LabelOf;
 pub use crate::manager::ManagerParts;
 pub use crate::manager::TagManager;
+pub use crate::manager::TagOf;
 
 pub mod builder {
     //! Contains a builder type for the [`TagManager`].

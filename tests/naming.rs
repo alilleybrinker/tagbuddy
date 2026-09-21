@@ -7,10 +7,9 @@
 
 use std::slice::Iter;
 use tagbuddy::brand::make_guard;
-use tagbuddy::label::DefaultLabel;
 use tagbuddy::parse::Plain;
 use tagbuddy::query::{contains, Index, Match, Scan};
-use tagbuddy::storage::{DefaultStorage, Spur};
+use tagbuddy::storage::DefaultStorage;
 use tagbuddy::tag::{PlainTag, Tagged};
 use tagbuddy::TagManager;
 
@@ -35,7 +34,7 @@ impl<'brand> Tagged<PlainTag<'brand>> for Post<'brand> {
     }
 }
 
-type Manager<'brand> = TagManager<'brand, DefaultLabel, Spur, PlainTag<'brand>, Plain>;
+type Manager<'brand> = TagManager<'brand, Plain>;
 
 /// Holding an index in a struct: the manager type stands in for its five parameters.
 struct Search<'m, 'items, 'brand> {
