@@ -302,6 +302,62 @@ where
     /// through the copy. That's not just bookkeeping — the copy assigns its own keys, and
     /// makes no attempt to give a string the key it had in the original, so the old keys
     /// would be meaningless here even if the type system allowed them through.
+    ///
+    /// A tag still resolves through the storage it came from, copy or no copy:
+    ///
+    /// ```
+    /// # use tagbuddy::brand::make_guard;
+    /// # use tagbuddy::label::DefaultLabel;
+    /// # use tagbuddy::parse::Plain;
+    /// # use tagbuddy::storage::DefaultStorage;
+    /// # use tagbuddy::TagManager;
+    /// make_guard!(guard);
+    /// let storage = DefaultStorage::fresh(guard);
+    /// let manager = TagManager::builder()
+    ///     .parser(Plain::new())
+    ///     .storage(storage.share_as::<DefaultLabel>())
+    ///     .build();
+    /// let tag = manager.parse_tag("hello").unwrap();
+    ///
+    /// make_guard!(copy_guard);
+    /// let copy: DefaultStorage = storage.deep_clone(copy_guard);
+    /// let copied = TagManager::builder()
+    ///     .parser(Plain::new())
+    ///     .storage(copy.share_as::<DefaultLabel>())
+    ///     .build();
+    ///
+    /// assert_eq!(manager.resolve_tag(&tag), "hello");
+    /// # let _ = &copied;
+    /// ```
+    ///
+    /// Resolving it through the copy does not compile. As with the pair on [`Storage`]
+    /// itself, the value of this `compile_fail` block rests on the example above
+    /// compiling: the two differ only in which manager resolves the tag, so the copy's
+    /// new brand is the only thing left for it to fail on.
+    ///
+    /// ```compile_fail
+    /// # use tagbuddy::brand::make_guard;
+    /// # use tagbuddy::label::DefaultLabel;
+    /// # use tagbuddy::parse::Plain;
+    /// # use tagbuddy::storage::DefaultStorage;
+    /// # use tagbuddy::TagManager;
+    /// make_guard!(guard);
+    /// let storage = DefaultStorage::fresh(guard);
+    /// let manager = TagManager::builder()
+    ///     .parser(Plain::new())
+    ///     .storage(storage.share_as::<DefaultLabel>())
+    ///     .build();
+    /// let tag = manager.parse_tag("hello").unwrap();
+    ///
+    /// make_guard!(copy_guard);
+    /// let copy: DefaultStorage = storage.deep_clone(copy_guard);
+    /// let copied = TagManager::builder()
+    ///     .parser(Plain::new())
+    ///     .storage(copy.share_as::<DefaultLabel>())
+    ///     .build();
+    ///
+    /// assert_eq!(copied.resolve_tag(&tag), "hello"); // ERROR: `tag` carries the original's brand
+    /// ```
     pub fn deep_clone<'new, L2>(&self, guard: Guard<'new>) -> Storage<'new, L2, K, H>
     where
         L2: Label,

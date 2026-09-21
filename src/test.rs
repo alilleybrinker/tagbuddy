@@ -6,9 +6,12 @@ use crate::error::ParseError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::parse::*;
+use crate::storage::Capacity;
 use crate::storage::DefaultStorage;
+use crate::storage::Interner;
 use crate::storage::Key;
 use crate::storage::Spur;
+use crate::storage::Storage;
 use crate::tag::KeyValueSep;
 use crate::tag::KeyValueTag;
 use crate::tag::MultipartTag;
@@ -18,14 +21,17 @@ use crate::tag::TagKind;
 use crate::TagManager;
 use anyhow::anyhow as err;
 use anyhow::Result;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::BuildHasher;
+use std::hash::BuildHasherDefault;
 use std::hash::Hash;
 use std::sync::Arc;
 
 // Helper function to test that a tag that's parsed and then resolved
 // back into a string results in the same string that was originally
 // put into the manager.
-fn test_roundtrip<'brand, L, K, T, P>(
-    manager: &TagManager<'brand, L, K, T, P>,
+fn test_roundtrip<'brand, L, K, T, P, H>(
+    manager: &TagManager<'brand, L, K, T, P, H>,
     input: &str,
 ) -> Result<()>
 where
@@ -33,6 +39,7 @@ where
     K: Key + Hash,
     T: Tag<'brand, Label = L, Key = K>,
     P: Parser<'brand, Tag = T> + Send + Sync,
+    H: BuildHasher + Clone,
 {
     let tag = manager.parse_tag(input)?;
     let output = manager.resolve_tag(&tag);
@@ -481,4 +488,204 @@ fn tags_resolve_concurrently_without_a_lock() {
 
     // Every thread interned the same 16 strings, and interning dedupes.
     assert_eq!(manager.storage().len(), 16);
+}
+
+//---------------------------------------------------------------------------
+// Storage construction and sharing
+
+#[test]
+fn deep_clone_copies_every_string() -> Result<()> {
+    make_guard!(original_guard);
+    let original = DefaultStorage::fresh(original_guard);
+
+    let inputs = ["hello", "world", "today", "its", "me"];
+    for input in inputs {
+        original.get_or_intern(input);
+    }
+
+    make_guard!(copy_guard);
+    let copy: DefaultStorage = original.deep_clone(copy_guard);
+
+    assert_eq!(copy.len(), original.len());
+
+    // Every string made it across, and resolves through the copy's own keys. This
+    // deliberately doesn't assert that a string kept the *key* it had in the original:
+    // `deep_clone` makes no such promise, and the brand stops stale keys reaching here
+    // anyway.
+    for input in inputs {
+        let key = copy
+            .get(input)
+            .expect("every string should have been copied");
+        assert_eq!(copy.resolve(key), input);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn deep_clone_is_independent_of_its_original() -> Result<()> {
+    make_guard!(original_guard);
+    let original = DefaultStorage::fresh(original_guard);
+    original.get_or_intern("shared");
+
+    make_guard!(copy_guard);
+    let copy: DefaultStorage = original.deep_clone(copy_guard);
+
+    // Interning into one doesn't reach the other: they're separate interners, which is
+    // the whole reason the copy needs a guard of its own.
+    original.get_or_intern("only-in-original");
+    copy.get_or_intern("only-in-copy");
+
+    assert!(original.get("only-in-copy").is_none());
+    assert!(copy.get("only-in-original").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn shared_keeps_earlier_tags_valid_when_another_holder_interns() -> Result<()> {
+    // A handle held outside this crate, wrapped with a brand of its own.
+    let foreign: Arc<Interner> = Arc::new(Interner::new());
+
+    make_guard!(guard);
+    let storage: DefaultStorage = Storage::shared(guard, &foreign);
+
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(storage.share_as::<DefaultLabel>())
+        .build();
+
+    let tag = manager.parse_tag("hello")?;
+
+    // The other holder interns more, directly through its own handle. An append-only
+    // interner has no way to remove or reindex what's already there, so this can only
+    // grow it -- which is exactly why sharing a handle stays safe.
+    for i in 0..64 {
+        foreign.get_or_intern(format!("foreign-{i}"));
+    }
+
+    assert_eq!(manager.resolve_tag(&tag), "hello");
+
+    Ok(())
+}
+
+#[test]
+fn unique_takes_ownership_of_a_prepopulated_interner() -> Result<()> {
+    let interner = Interner::new();
+    interner.get_or_intern("already-here");
+
+    make_guard!(guard);
+    let storage: DefaultStorage = Storage::unique(guard, interner);
+
+    // Strings interned before the storage existed are still resolvable, they just
+    // aren't tags: nothing branded points at them yet.
+    let key = storage
+        .get("already-here")
+        .expect("interned before wrapping");
+    assert_eq!(storage.resolve(key), "already-here");
+
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(storage.share_as::<DefaultLabel>())
+        .build();
+
+    // Interning the same string through a tag dedupes onto the existing key.
+    let tag = manager.parse_tag("already-here")?;
+    assert_eq!(manager.resolve_tag(&tag), "already-here");
+    assert_eq!(manager.storage().len(), 1);
+
+    Ok(())
+}
+
+#[test]
+fn fresh_with_capacity_still_grows_past_it() -> Result<()> {
+    make_guard!(guard);
+    let storage = DefaultStorage::fresh_with_capacity(guard, Capacity::for_strings(2));
+
+    for i in 0..16 {
+        storage.get_or_intern(&format!("tag-{i}"));
+    }
+
+    assert_eq!(storage.len(), 16);
+
+    Ok(())
+}
+
+#[test]
+fn try_resolve_refuses_a_key_from_nowhere() -> Result<()> {
+    make_guard!(guard);
+    let storage = DefaultStorage::fresh(guard);
+
+    let key = storage.get_or_intern("hello");
+    assert_eq!(storage.try_resolve(key), Some("hello"));
+
+    // A key built by hand, rather than handed out by this interner. No `Tag` can carry
+    // one past the brand check, so this is the only way to reach the `None` arm.
+    let forged = Spur::try_from_usize(9_999).expect("in range for a Spur");
+    assert_eq!(storage.try_resolve(forged), None);
+
+    Ok(())
+}
+
+//---------------------------------------------------------------------------
+// The hasher generic
+
+/// A `BuildHasher` that isn't `RandomState`, to exercise the `H` parameter.
+///
+/// Every other test in this file runs on the default hasher, so without this the `H`
+/// generic threading through `Storage`, `Tag`, `Parser`, and `TagManager` would only
+/// ever be instantiated at one type.
+type TestHasher = BuildHasherDefault<DefaultHasher>;
+
+#[test]
+fn a_non_default_hasher_roundtrips() -> Result<()> {
+    make_guard!(guard);
+
+    let storage: Storage<'_, DefaultLabel, Spur, TestHasher> =
+        Storage::fresh_with_hasher(guard, TestHasher::default());
+
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(storage)
+        .build();
+
+    test_roundtrip(&manager, "hello")
+}
+
+#[test]
+fn a_non_default_hasher_works_with_capacity() -> Result<()> {
+    make_guard!(guard);
+
+    let storage: Storage<'_, DefaultLabel, Spur, TestHasher> =
+        Storage::fresh_with_capacity_and_hasher(
+            guard,
+            Capacity::for_strings(4),
+            TestHasher::default(),
+        );
+
+    let manager = TagManager::builder()
+        .parser(KeyValue::new(KvPolicy::NoAmbiguousSep))
+        .storage(storage)
+        .build();
+
+    test_roundtrip(&manager, "hello:world")
+}
+
+#[test]
+fn a_non_default_hasher_survives_sharing_and_cloning() -> Result<()> {
+    make_guard!(guard);
+
+    let storage: Storage<'_, DefaultLabel, Spur, TestHasher> =
+        Storage::fresh_with_hasher(guard, TestHasher::default());
+    storage.get_or_intern("hello");
+
+    // `share_as` and `deep_clone` both have to carry `H` through.
+    let shared = storage.share_as::<DefaultLabel>();
+    assert_eq!(shared.len(), 1);
+
+    make_guard!(copy_guard);
+    let copy: Storage<'_, DefaultLabel, Spur, TestHasher> = storage.deep_clone(copy_guard);
+    assert!(copy.get("hello").is_some());
+
+    Ok(())
 }
