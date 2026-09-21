@@ -274,6 +274,10 @@ copies the brand of the store that made it. Invariant lifetimes never unify, so
 crossing them can't typecheck. A separate, weaker `Label` marker distinguishes
 tag vocabularies that deliberately share one store.
 
+If you want the long version — why the brand is an *invariant* lifetime, why a
+`Default` impl would have broken it, and the rest of the type-level machinery —
+see [`docs/type-patterns.md`](docs/type-patterns.md).
+
 [`lasso::ThreadedRodeo`]: https://docs.rs/lasso/latest/lasso/struct.ThreadedRodeo.html
 
 ## Minimum supported Rust version
