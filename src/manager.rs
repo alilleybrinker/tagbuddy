@@ -1,14 +1,17 @@
 //! Produce and resolve tags.
 
 use crate::error::ParseError;
+use crate::label::DefaultLabel;
 #[cfg(doc)]
 use crate::label::Label;
 use crate::parse::*;
 use crate::query::Index;
 use crate::query::Scan;
+use crate::storage::Guard;
 #[cfg(doc)]
 use crate::storage::Interner;
 use crate::storage::Key;
+use crate::storage::Spur;
 use crate::storage::Storage;
 use crate::tag::KeyValueSep;
 #[cfg(doc)]
@@ -183,6 +186,43 @@ where
     }
 }
 
+impl<'brand, P> TagManager<'brand, P>
+where
+    P: Parser<'brand> + Send + Sync,
+    // Pinning the label to the default is what keeps this inferable. `new` makes the
+    // storage itself, so the label would otherwise be determined by the parser and the
+    // parser's label and key by nothing at all -- `TagManager::new(guard, Plain::new())`
+    // would be ambiguous. Labels exist to let two managers share one interner, which needs
+    // `TagManager::builder` and an explicit `Storage` anyway.
+    TagOf<'brand, P>: Tag<'brand, Label = DefaultLabel, Key = Spur>,
+{
+    /// Build a [`TagManager`] with its own fresh [`Storage`] and the default separators.
+    ///
+    /// The common case in one call, rather than minting a guard, building a [`Storage`]
+    /// from it, and then running the builder:
+    ///
+    /// ```
+    /// # use tagbuddy::brand::make_guard;
+    /// # use tagbuddy::parse::Plain;
+    /// # use tagbuddy::TagManager;
+    /// make_guard!(guard);
+    /// let manager = TagManager::new(guard, Plain::new());
+    ///
+    /// let tag = manager.parse_tag("hello").unwrap();
+    /// assert_eq!(manager.resolve_tag(&tag), "hello");
+    /// ```
+    ///
+    /// Only for managers using [`DefaultLabel`]. Use [`TagManager::builder`] when the
+    /// separators aren't the defaults, when the tags carry a [`Label`] of their own, or
+    /// when the storage is shared with another manager via [`Storage::share_as`].
+    pub fn new(guard: Guard<'brand>, parser: P) -> Self {
+        TagManager::builder()
+            .parser(parser)
+            .storage(Storage::fresh(guard))
+            .build()
+    }
+}
+
 impl<'brand, P, H> TagManager<'brand, P, H>
 where
     P: Parser<'brand> + Send + Sync,
@@ -206,6 +246,27 @@ where
         C: FromIterator<Result<P::Tag, ParseError>>,
     {
         self.parse_tags_into_with(src, identity)
+    }
+
+    /// Parse a sequence of tags, stopping at the first failure.
+    ///
+    /// The common case of [`TagManager::parse_tags_into`], which otherwise needs a
+    /// turbofish to say which collection you meant.
+    pub fn parse_tags<'raw>(
+        &self,
+        src: impl IntoIterator<Item = &'raw str>,
+    ) -> Result<Vec<P::Tag>, ParseError> {
+        self.parse_tags_into(src)
+    }
+
+    /// Resolve a sequence of tags into their strings.
+    ///
+    /// The common case of [`TagManager::resolve_tags_into`].
+    pub fn resolve_tags<'tag>(&self, src: impl IntoIterator<Item = &'tag P::Tag>) -> Vec<String>
+    where
+        P::Tag: 'tag,
+    {
+        self.resolve_tags_into(src)
     }
 
     /// Parse tags into a collection of your choosing, pairing each with its [`TagKind`].

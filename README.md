@@ -10,16 +10,12 @@ querying data based on those tags.
 use tagbuddy::brand::make_guard;
 use tagbuddy::parse::KeyValue;
 use tagbuddy::parse::KvPolicy;
-use tagbuddy::storage::DefaultStorage;
 use tagbuddy::TagManager;
 
 // `make_guard!` mints the brand for a storage. See below for what it buys.
 make_guard!(guard);
 
-let manager = TagManager::builder()
-    .parser(KeyValue::new(KvPolicy::NoAmbiguousSep))
-    .storage(DefaultStorage::fresh(guard))
-    .build();
+let manager = TagManager::new(guard, KeyValue::new(KvPolicy::NoAmbiguousSep));
 
 let tag = manager.parse_tag("score:5").unwrap();
 
@@ -42,24 +38,15 @@ over an item; `Match` is a predicate over a single tag.
 use tagbuddy::brand::make_guard;
 use tagbuddy::parse::Plain;
 use tagbuddy::query::exact;
-use tagbuddy::storage::DefaultStorage;
-use tagbuddy::tag::{PlainTag, Tagged};
-use tagbuddy::TagManager;
-use std::slice::Iter;
+use tagbuddy::tag::PlainTag;
+use tagbuddy::{tagged, TagManager};
 
 struct Post<'b> { title: &'static str, tags: Vec<PlainTag<'b>> }
 
-impl<'b> Tagged<PlainTag<'b>> for Post<'b> {
-    type TagIter<'i> = Iter<'i, PlainTag<'b>> where Self: 'i;
-    fn has_tags(&self) -> bool { !self.tags.is_empty() }
-    fn get_tags(&self) -> Self::TagIter<'_> { self.tags.iter() }
-}
+tagged!(Post<'b> => PlainTag<'b> { tags });
 
 make_guard!(guard);
-let manager = TagManager::builder()
-    .parser(Plain::new())
-    .storage(DefaultStorage::fresh(guard))
-    .build();
+let manager = TagManager::new(guard, Plain::new());
 
 let tag = |s: &str| manager.parse_tag(s).unwrap();
 let posts = vec![

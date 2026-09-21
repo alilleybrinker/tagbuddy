@@ -477,3 +477,62 @@ pub trait Tagged<T> {
     /// Get the tags of the tagged type.
     fn get_tags(&self) -> Self::TagIter<'_>;
 }
+
+/// Implement [`Tagged`] for a type whose tags live in a `Vec` field.
+///
+/// The impl is always the same shape — a slice iterator, an emptiness check, and
+/// `.iter()` — and writing it by hand means writing a generic associated type with its
+/// `where` clause every time. This writes it for you:
+///
+/// ```
+/// # use tagbuddy::{generate_label, tagged};
+/// # use tagbuddy::tag::{PlainTag, Tagged};
+/// generate_label! { pub Tags {} }
+///
+/// struct Post<'brand> {
+///     tags: Vec<PlainTag<'brand, Tags>>,
+/// }
+///
+/// tagged!(Post<'brand> => PlainTag<'brand, Tags> { tags });
+/// ```
+///
+/// A type can carry several tag vocabularies by invoking this once per vocabulary, since
+/// each produces an impl for a different tag type. For anything that isn't a `Vec` field —
+/// a single tag, a map, a computed set — write the impl by hand; there's not much to it
+/// beyond the associated type.
+#[macro_export]
+macro_rules! tagged {
+    ($item:ident <$life:lifetime> => $tag:ty { $field:ident }) => {
+        impl<$life> $crate::tag::Tagged<$tag> for $item<$life> {
+            type TagIter<'__iter>
+                = ::core::slice::Iter<'__iter, $tag>
+            where
+                Self: '__iter;
+
+            fn has_tags(&self) -> bool {
+                !self.$field.is_empty()
+            }
+
+            fn get_tags(&self) -> Self::TagIter<'_> {
+                self.$field.iter()
+            }
+        }
+    };
+
+    ($item:ty => $tag:ty { $field:ident }) => {
+        impl $crate::tag::Tagged<$tag> for $item {
+            type TagIter<'__iter>
+                = ::core::slice::Iter<'__iter, $tag>
+            where
+                Self: '__iter;
+
+            fn has_tags(&self) -> bool {
+                !self.$field.is_empty()
+            }
+
+            fn get_tags(&self) -> Self::TagIter<'_> {
+                self.$field.iter()
+            }
+        }
+    };
+}
