@@ -4,7 +4,6 @@ use crate::brand::make_guard;
 use crate::brand::Guard;
 use crate::error::ParseError;
 use crate::label::DefaultLabel;
-use crate::label::Label;
 use crate::parse::*;
 use crate::storage::Capacity;
 use crate::storage::DefaultStorage;
@@ -14,10 +13,7 @@ use crate::storage::Spur;
 use crate::storage::Storage;
 #[cfg(feature = "convert_case")]
 use crate::tag::KeyValueSep;
-use crate::tag::KeyValueTag;
-use crate::tag::MultipartTag;
 use crate::tag::PathSep;
-use crate::tag::Tag;
 #[cfg(all(feature = "convert_case", feature = "either"))]
 use crate::tag::TagKind;
 use crate::TagManager;
@@ -27,21 +23,14 @@ use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::BuildHasher;
 use std::hash::BuildHasherDefault;
-use std::hash::Hash;
 use std::sync::Arc;
 
 // Helper function to test that a tag that's parsed and then resolved
 // back into a string results in the same string that was originally
 // put into the manager.
-fn test_roundtrip<'brand, L, K, T, P, H>(
-    manager: &TagManager<'brand, L, K, T, P, H>,
-    input: &str,
-) -> Result<()>
+fn test_roundtrip<'brand, P, H>(manager: &TagManager<'brand, P, H>, input: &str) -> Result<()>
 where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
+    P: Parser<'brand> + Send + Sync,
     H: BuildHasher + Clone,
 {
     let tag = manager.parse_tag(input)?;
@@ -218,7 +207,7 @@ fn complex_parser() -> Result<()> {
 fn key_value_manager<'brand>(
     guard: Guard<'brand>,
     policy: KvPolicy,
-) -> TagManager<'brand, DefaultLabel, Spur, KeyValueTag<'brand>, KeyValue> {
+) -> TagManager<'brand, KeyValue> {
     TagManager::builder()
         .parser(KeyValue::new(policy))
         .storage(DefaultStorage::fresh(guard))
@@ -333,7 +322,7 @@ fn batch_parse_reports_per_tag_errors() {
 fn multipart_manager<'brand>(
     guard: Guard<'brand>,
     policy: MultipartPolicy,
-) -> TagManager<'brand, DefaultLabel, Spur, MultipartTag<'brand>, Multipart> {
+) -> TagManager<'brand, Multipart> {
     TagManager::builder()
         .parser(Multipart::new(policy))
         .storage(DefaultStorage::fresh(guard))

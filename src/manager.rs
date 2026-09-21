@@ -2,8 +2,12 @@
 
 use crate::error::ParseError;
 use crate::label::DefaultLabel;
+#[cfg(doc)]
 use crate::label::Label;
 use crate::parse::*;
+use crate::query::Index;
+use crate::query::Scan;
+use crate::storage::Guard;
 #[cfg(doc)]
 use crate::storage::Interner;
 use crate::storage::Key;
@@ -15,14 +19,88 @@ use crate::tag::KeyValueTag;
 #[cfg(doc)]
 use crate::tag::MultipartTag;
 use crate::tag::PathSep;
+#[cfg(doc)]
 use crate::tag::PlainTag;
 use crate::tag::Tag;
 use crate::tag::TagKind;
+use crate::tag::TagParts;
+use crate::tag::Tagged;
 use std::collections::hash_map::RandomState;
 use std::convert::identity;
 use std::hash::BuildHasher;
 use std::hash::Hash;
 use typed_builder::TypedBuilder;
+
+/// The [`Tag`] type a parser produces.
+pub type TagOf<'brand, P> = <P as Parser<'brand>>::Tag;
+
+/// The [`Label`] of the tags a parser produces.
+pub type LabelOf<'brand, P> = <TagOf<'brand, P> as Tag<'brand>>::Label;
+
+/// The [`Key`] of the tags a parser produces.
+pub type KeyOf<'brand, P> = <TagOf<'brand, P> as Tag<'brand>>::Key;
+
+mod sealed {
+    /// Prevents [`ManagerParts`] being implemented outside this crate.
+    ///
+    /// [`ManagerParts`]: super::ManagerParts
+    pub trait Sealed {}
+}
+
+/// What the query engine needs from a [`TagManager`], without naming its brand.
+///
+/// A [`TagManager`] has a lifetime and five type parameters, and anything generic over one
+/// has to repeat all six. [`Index`] would otherwise be
+/// `Index<'m, 'brand, 'items, L, K, T, P, H, I>` — nine parameters to write out in any
+/// struct field or return type, even though inference handles them at the call site.
+///
+/// This collapses them. The associated types are projections of the manager's parameters,
+/// and the three methods are the only things the query engine actually does with a manager:
+/// look a query string up, get a key's text back, and see inside a tag.
+///
+/// # Why there's no `'brand` here
+///
+/// The trait deliberately has no lifetime parameter, and [`ManagerParts::Tag`] is just the
+/// manager's tag type — which already carries its own brand. So `<M as ManagerParts>::Tag`
+/// for a manager branded `'b` projects to, say, `PlainTag<'b>`, without the trait ever
+/// naming `'b`. That's what lets [`Index`] drop from nine parameters to four.
+///
+/// It's also why the operations are methods rather than a `fn storage(&self) -> &Storage<..>`
+/// accessor: naming [`Storage`] would mean naming the brand, putting the lifetime straight
+/// back into every signature.
+///
+/// # Sealed
+///
+/// Implemented only for [`TagManager`]. There's no meaningful way to be "the parts of a
+/// manager" without being one, and sealing keeps this free to change.
+///
+/// [`Index`]: crate::query::Index
+pub trait ManagerParts: sealed::Sealed {
+    /// The [`Key`] the manager's [`Storage`] hands out.
+    type Key: Key + Hash;
+
+    /// The [`Tag`] type the manager's parser produces.
+    type Tag;
+
+    /// Find the key an already-interned string was given, if it has one.
+    ///
+    /// This is [`Storage::get`], not `get_or_intern`: a query must not add its own search
+    /// terms to an append-only interner.
+    fn lookup(&self, raw: &str) -> Option<Self::Key>;
+
+    /// Get the text behind a key.
+    ///
+    /// Only needed for value constraints that can't be answered by key identity — a regex
+    /// or a predicate.
+    fn text(&self, key: Self::Key) -> &str;
+
+    /// Get a structured view of a tag's keys.
+    ///
+    /// An associated function rather than a method on [`Tag`] directly, because calling
+    /// [`Tag::parts`] would require the bound `Self::Tag: Tag<'brand>`, and `'brand` is
+    /// exactly what this trait exists not to name.
+    fn parts_of(tag: &Self::Tag) -> TagParts<'_, Self::Key>;
+}
 
 /// Constructs [`Tag`]s according to the configured parser and interner.
 ///
@@ -31,16 +109,19 @@ use typed_builder::TypedBuilder;
 /// underlying [`Interner`]. The [`Interner`] may be shared with other
 /// [`TagManager`]s, via [`Storage::share_as`].
 ///
-/// [`TagManager`] is designed to be generic over:
+/// # Parameters
 ///
-/// - The parser used to produce tags.
-/// - The key type and hasher used to store tag data.
+/// Just the parser and the hasher. Everything else follows from the parser: it determines
+/// the [`Tag`] type it produces, which determines that tag's [`Label`] and [`Key`]. So a
+/// manager over plain tags labelled `Tags` is
 ///
-/// The trait bounds on [`TagManager`] ensure that the parser and storage agree
-/// on the [`Key`] used as a handle for the stored string data. This is required
-/// because the parser produces [`Tag`]s which store [`Key`]s so they can later
-/// be resolved back into [`String`]s to recover the full originally-input tag
-/// data.
+/// ```text
+/// TagManager<'brand, Plain<Tags>>
+/// ```
+///
+/// rather than restating the label, key and tag type the parser already implies. Those
+/// projections are available as [`TagOf`], [`LabelOf`] and [`KeyOf`] when you need to name
+/// one, and [`ManagerParts`] bundles them for code generic over a manager.
 ///
 /// Resolving through a [`TagManager`] can't fail. Its [`Storage`] carries a
 /// `'brand`, so a [`Tag`] can only be resolved through the storage that interned
@@ -54,18 +135,9 @@ use typed_builder::TypedBuilder;
 /// each part separately, again on the expectation that individual parts will
 /// be frequently repeated across tags, resulting in space savings from interning.
 #[derive(TypedBuilder)]
-pub struct TagManager<
-    'brand,
-    L = DefaultLabel,
-    K = Spur,
-    T = PlainTag<'brand, L, K>,
-    P = Plain<L, K>,
-    H = RandomState,
-> where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
+pub struct TagManager<'brand, P = Plain, H = RandomState>
+where
+    P: Parser<'brand> + Send + Sync,
     H: BuildHasher + Clone,
 {
     /// Defines how key-value tags are parsed, if key-value tags are permitted.
@@ -80,17 +152,81 @@ pub struct TagManager<
     pub(crate) path_separator: PathSep,
 
     /// Interns and stores string data for tags, to reduce memory usage.
-    pub(crate) storage: Storage<'brand, L, K, H>,
+    pub(crate) storage: Storage<'brand, LabelOf<'brand, P>, KeyOf<'brand, P>, H>,
 }
 
-impl<
-        'brand,
-        L: Label,
-        K: Key + Hash,
-        T: Tag<'brand, Label = L, Key = K>,
-        P: Parser<'brand, Tag = T> + Send + Sync,
-        H: BuildHasher + Clone,
-    > TagManager<'brand, L, K, T, P, H>
+impl<'brand, P, H> sealed::Sealed for TagManager<'brand, P, H>
+where
+    P: Parser<'brand> + Send + Sync,
+    H: BuildHasher + Clone,
+{
+}
+
+impl<'brand, P, H> ManagerParts for TagManager<'brand, P, H>
+where
+    P: Parser<'brand> + Send + Sync,
+    H: BuildHasher + Clone,
+{
+    type Key = KeyOf<'brand, P>;
+
+    // The tag type carries `'brand` inside itself, so this projects a branded tag type
+    // without the trait having a brand of its own.
+    type Tag = TagOf<'brand, P>;
+
+    fn lookup(&self, raw: &str) -> Option<Self::Key> {
+        self.storage.get(raw)
+    }
+
+    fn text(&self, key: Self::Key) -> &str {
+        self.storage.resolve(key)
+    }
+
+    fn parts_of(tag: &Self::Tag) -> TagParts<'_, Self::Key> {
+        tag.parts()
+    }
+}
+
+impl<'brand, P> TagManager<'brand, P>
+where
+    P: Parser<'brand> + Send + Sync,
+    // Pinning the label to the default is what keeps this inferable. `new` makes the
+    // storage itself, so the label would otherwise be determined by the parser and the
+    // parser's label and key by nothing at all -- `TagManager::new(guard, Plain::new())`
+    // would be ambiguous. Labels exist to let two managers share one interner, which needs
+    // `TagManager::builder` and an explicit `Storage` anyway.
+    TagOf<'brand, P>: Tag<'brand, Label = DefaultLabel, Key = Spur>,
+{
+    /// Build a [`TagManager`] with its own fresh [`Storage`] and the default separators.
+    ///
+    /// The common case in one call, rather than minting a guard, building a [`Storage`]
+    /// from it, and then running the builder:
+    ///
+    /// ```
+    /// # use tagbuddy::brand::make_guard;
+    /// # use tagbuddy::parse::Plain;
+    /// # use tagbuddy::TagManager;
+    /// make_guard!(guard);
+    /// let manager = TagManager::new(guard, Plain::new());
+    ///
+    /// let tag = manager.parse_tag("hello").unwrap();
+    /// assert_eq!(manager.resolve_tag(&tag), "hello");
+    /// ```
+    ///
+    /// Only for managers using [`DefaultLabel`]. Use [`TagManager::builder`] when the
+    /// separators aren't the defaults, when the tags carry a [`Label`] of their own, or
+    /// when the storage is shared with another manager via [`Storage::share_as`].
+    pub fn new(guard: Guard<'brand>, parser: P) -> Self {
+        TagManager::builder()
+            .parser(parser)
+            .storage(Storage::fresh(guard))
+            .build()
+    }
+}
+
+impl<'brand, P, H> TagManager<'brand, P, H>
+where
+    P: Parser<'brand> + Send + Sync,
+    H: BuildHasher + Clone,
 {
     /// Attempt to parse a structured tag from the provided "raw" tag.
     ///
@@ -110,6 +246,27 @@ impl<
         C: FromIterator<Result<P::Tag, ParseError>>,
     {
         self.parse_tags_into_with(src, identity)
+    }
+
+    /// Parse a sequence of tags, stopping at the first failure.
+    ///
+    /// The common case of [`TagManager::parse_tags_into`], which otherwise needs a
+    /// turbofish to say which collection you meant.
+    pub fn parse_tags<'raw>(
+        &self,
+        src: impl IntoIterator<Item = &'raw str>,
+    ) -> Result<Vec<P::Tag>, ParseError> {
+        self.parse_tags_into(src)
+    }
+
+    /// Resolve a sequence of tags into their strings.
+    ///
+    /// The common case of [`TagManager::resolve_tags_into`].
+    pub fn resolve_tags<'tag>(&self, src: impl IntoIterator<Item = &'tag P::Tag>) -> Vec<String>
+    where
+        P::Tag: 'tag,
+    {
+        self.resolve_tags_into(src)
     }
 
     /// Parse tags into a collection of your choosing, pairing each with its [`TagKind`].
@@ -178,8 +335,65 @@ impl<
             .collect()
     }
 
+    /// Select items to run queries against by scanning them.
+    ///
+    /// Takes anything iterable, borrows rather than collects, and costs one pass per
+    /// query. Use [`TagManager::index`] instead when the same items are queried more than
+    /// once.
+    ///
+    /// ```
+    /// # use tagbuddy::brand::make_guard;
+    /// # use tagbuddy::parse::Plain;
+    /// # use tagbuddy::query::{contains, Match};
+    /// # use tagbuddy::storage::DefaultStorage;
+    /// # use tagbuddy::tag::{PlainTag, Tagged};
+    /// # use tagbuddy::TagManager;
+    /// # use std::slice::Iter;
+    /// # struct Post<'b>(Vec<PlainTag<'b>>);
+    /// # impl<'b> Tagged<PlainTag<'b>> for Post<'b> {
+    /// #     type TagIter<'i> = Iter<'i, PlainTag<'b>> where Self: 'i;
+    /// #     fn has_tags(&self) -> bool { !self.0.is_empty() }
+    /// #     fn get_tags(&self) -> Self::TagIter<'_> { self.0.iter() }
+    /// # }
+    /// make_guard!(guard);
+    /// let manager = TagManager::builder()
+    ///     .parser(Plain::new())
+    ///     .storage(DefaultStorage::fresh(guard))
+    ///     .build();
+    ///
+    /// let posts = vec![
+    ///     Post(vec![manager.parse_tag("rust").unwrap()]),
+    ///     Post(vec![manager.parse_tag("go").unwrap()]),
+    /// ];
+    ///
+    /// let found = manager
+    ///     .select(&posts)
+    ///     .matching(&contains(Match::Exact("rust".to_owned())))
+    ///     .count();
+    ///
+    /// assert_eq!(found, 1);
+    /// ```
+    pub fn select<Items>(&self, items: Items) -> Scan<'_, Self, Items> {
+        Scan::new(self, items)
+    }
+
+    /// Build a reusable inverted index over `items`.
+    ///
+    /// Requires a slice, because the index maps tags to item *positions*. Building costs
+    /// about what one [`TagManager::select`] pass costs, so this pays off from the second
+    /// query onwards.
+    ///
+    /// The index borrows `items`, so it can't be left holding stale positions: the
+    /// collection can't change while the index is alive.
+    pub fn index<'m, 'items, I>(&'m self, items: &'items [I]) -> Index<'m, 'items, Self, I>
+    where
+        I: Tagged<TagOf<'brand, P>>,
+    {
+        Index::build(self, items)
+    }
+
     /// Get the inner [`Storage`] of the [`TagManager`].
-    pub fn storage(&self) -> &Storage<'brand, L, K, H> {
+    pub fn storage(&self) -> &Storage<'brand, LabelOf<'brand, P>, KeyOf<'brand, P>, H> {
         &self.storage
     }
 

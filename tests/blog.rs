@@ -2,17 +2,16 @@ pub mod blog {
     use anyhow::Result;
     use std::iter::once as iter_once;
     use std::iter::Once as OnceIter;
-    use std::ops::Not as _;
-    use std::result::Result as StdResult;
-    use std::slice::Iter as SliceIter;
+
     use tagbuddy::brand::Guard;
     use tagbuddy::generate_label;
     use tagbuddy::parse::*;
-    use tagbuddy::storage::Spur;
+
     use tagbuddy::storage::Storage;
     use tagbuddy::tag::KeyValueTag;
     use tagbuddy::tag::PlainTag;
     use tagbuddy::tag::Tagged;
+    use tagbuddy::tagged;
     use tagbuddy::TagManager;
 
     generate_label! {
@@ -20,10 +19,10 @@ pub mod blog {
         pub Ratings {}
     }
 
-    type PostTagsManager<'brand> =
-        TagManager<'brand, Tags, Spur, PlainTag<'brand, Tags>, Plain<Tags>>;
-    type PostRatingsManager<'brand> =
-        TagManager<'brand, Ratings, Spur, KeyValueTag<'brand, Ratings>, KeyValue<Ratings>>;
+    // The parser determines the tag type, which determines the label and key, so naming
+    // the parser is enough.
+    type PostTagsManager<'brand> = TagManager<'brand, Plain<Tags>>;
+    type PostRatingsManager<'brand> = TagManager<'brand, KeyValue<Ratings>>;
 
     pub struct Blog<'brand> {
         posts: Vec<BlogPost<'brand>>,
@@ -37,6 +36,8 @@ pub mod blog {
         /// The `guard` brands the blog's storage, which is what ties every tag the blog
         /// produces to the interner that holds it.
         pub fn new(guard: Guard<'brand>) -> Self {
+            // Labelled, so it goes through the builder with an explicit `Storage`.
+            // `TagManager::new` is for the unlabelled case.
             let tag_manager = TagManager::builder()
                 .parser(Plain::new())
                 .storage(Storage::<Tags>::fresh(guard))
@@ -67,9 +68,7 @@ pub mod blog {
             let title = title.to_owned();
             let content = content.to_owned();
 
-            let tags = self
-                .tag_manager
-                .parse_tags_into::<StdResult<_, _>>(tags.iter().copied())?;
+            let tags = self.tag_manager.parse_tags(tags.iter().copied())?;
 
             let rating = self.rating_manager.parse_tag(rating)?;
 
@@ -112,7 +111,7 @@ pub mod blog {
             // No error to handle: the brand says these tags came from this storage, and
             // the interner is append-only, so they're still there.
             blog.tag_manager
-                .resolve_tags_into::<Vec<_>>(Tagged::<PlainTag<Tags>>::get_tags(self))
+                .resolve_tags(Tagged::<PlainTag<Tags>>::get_tags(self))
         }
 
         /// Get the rating of a blog post.
@@ -125,24 +124,12 @@ pub mod blog {
         }
     }
 
-    // Mark a blog post as being tagged with tags.
-    impl<'brand> Tagged<'brand, PlainTag<'brand, Tags>> for BlogPost<'brand> {
-        type TagIter<'iter>
-            = SliceIter<'iter, PlainTag<'brand, Tags>>
-        where
-            Self: 'iter;
-
-        fn has_tags(&self) -> bool {
-            self.tags.is_empty().not()
-        }
-
-        fn get_tags(&self) -> Self::TagIter<'_> {
-            self.tags.iter()
-        }
-    }
+    // Mark a blog post as being tagged with tags. The rating impl below stays by hand,
+    // since a single tag isn't a `Vec` field.
+    tagged!(BlogPost<'brand> => PlainTag<'brand, Tags> { tags });
 
     // Mark a blog post as being tagged with a rating.
-    impl<'brand> Tagged<'brand, KeyValueTag<'brand, Ratings>> for BlogPost<'brand> {
+    impl<'brand> Tagged<KeyValueTag<'brand, Ratings>> for BlogPost<'brand> {
         type TagIter<'iter>
             = OnceIter<&'iter KeyValueTag<'brand, Ratings>>
         where

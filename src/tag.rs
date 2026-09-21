@@ -19,6 +19,48 @@ use std::hash::BuildHasher;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
+/// A structured view of the [`Key`]s inside a [`Tag`].
+///
+/// [`Tag::resolve`] can turn a tag back into a string, but a query engine needs to see a
+/// tag's *keys* rather than its text: matching by key identity is a integer comparison,
+/// where matching by text would mean resolving every tag on every comparison. This is how
+/// a [`Tag`] exposes that, uniformly across tag kinds, so that code which works over tags
+/// generically — queries especially — doesn't have to know which concrete type it holds.
+///
+/// A [`Tag`] implementation outside this crate that doesn't fit any of these shapes should
+/// return [`TagParts::Opaque`], which matching treats as "matches nothing structurally".
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum TagParts<'tag, K> {
+    /// The single key of a [`PlainTag`].
+    Plain(K),
+
+    /// The separately-interned key and value of a [`KeyValueTag`].
+    KeyValue {
+        /// The key half.
+        key: K,
+        /// The value half.
+        value: K,
+    },
+
+    /// The parts of a [`MultipartTag`], in order.
+    Multipart(&'tag [K]),
+
+    /// A tag whose internals this crate can't see into.
+    Opaque,
+}
+
+impl<K> TagParts<'_, K> {
+    /// Get the [`TagKind`] these parts correspond to.
+    pub fn kind(&self) -> TagKind {
+        match self {
+            TagParts::Plain(_) => TagKind::Plain,
+            TagParts::KeyValue { .. } => TagKind::KeyValue,
+            TagParts::Multipart(_) => TagKind::Multipart,
+            TagParts::Opaque => TagKind::Other,
+        }
+    }
+}
+
 /// A trait defining a [`Tag`] which contains interned data.
 ///
 /// The _only_ defining operation of a [`Tag`] is that it can be
@@ -38,7 +80,17 @@ pub trait Tag<'brand> {
     type Key: Key + Hash;
 
     /// Get the [`TagKind`] of the current tag.
-    fn kind(&self) -> TagKind;
+    ///
+    /// Defaulted from [`Tag::parts`], which already knows the shape. Override it only if
+    /// a tag can report a kind its parts don't imply.
+    fn kind(&self) -> TagKind {
+        self.parts().kind()
+    }
+
+    /// Get a structured view of the [`Key`]s this tag holds.
+    ///
+    /// See [`TagParts`] for why this exists alongside [`Tag::resolve`].
+    fn parts(&self) -> TagParts<'_, Self::Key>;
 
     /// Resolve a [`Tag`] back into a [`String`].
     ///
@@ -82,10 +134,10 @@ where
         }
     }
 
-    fn kind(&self) -> TagKind {
+    fn parts(&self) -> TagParts<'_, Self::Key> {
         match self {
-            Either::Left(t) => t.kind(),
-            Either::Right(t) => t.kind(),
+            Either::Left(t) => t.parts(),
+            Either::Right(t) => t.parts(),
         }
     }
 }
@@ -148,8 +200,8 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for PlainTag<'brand, L, K> {
         self.resolve(storage)
     }
 
-    fn kind(&self) -> TagKind {
-        TagKind::Plain
+    fn parts(&self) -> TagParts<'_, Self::Key> {
+        TagParts::Plain(self.0)
     }
 }
 
@@ -226,8 +278,11 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for KeyValueTag<'brand, L, K> 
         self.resolve(storage, key_value_separator, path_separator)
     }
 
-    fn kind(&self) -> TagKind {
-        TagKind::KeyValue
+    fn parts(&self) -> TagParts<'_, Self::Key> {
+        TagParts::KeyValue {
+            key: self.0,
+            value: self.1,
+        }
     }
 }
 
@@ -320,8 +375,8 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for MultipartTag<'brand, L, K>
         self.resolve(storage, key_value_separator, path_separator)
     }
 
-    fn kind(&self) -> TagKind {
-        TagKind::Multipart
+    fn parts(&self) -> TagParts<'_, Self::Key> {
+        TagParts::Multipart(&self.0)
     }
 }
 
@@ -385,7 +440,20 @@ pub enum TagKind {
 ///
 /// This trait is generic over the tag type, to permit implementing
 /// it for multiple types of tags.
-pub trait Tagged<'brand, T: Tag<'brand>> {
+/// Note there's deliberately no bound on `T` here, and no `'brand` parameter. A tag type
+/// already carries its own brand, so a `Tagged` impl never has to name one:
+///
+/// ```ignore
+/// impl<'brand> Tagged<PlainTag<'brand, Tags>> for BlogPost<'brand> { .. }
+/// ```
+///
+/// Code that needs `T` to actually be a [`Tag`] says so itself. That keeps the lifetime
+/// out of every impl and every bound that mentions this trait, which matters because
+/// [`Index`] and [`Scan`] are generic over a manager whose brand they can't name.
+///
+/// [`Index`]: crate::query::Index
+/// [`Scan`]: crate::query::Scan
+pub trait Tagged<T> {
     /// The type of iterator used to provide the [`Tag`]s.
     ///
     /// The lifetime bounds indicate that the tagged type and the
@@ -408,4 +476,63 @@ pub trait Tagged<'brand, T: Tag<'brand>> {
 
     /// Get the tags of the tagged type.
     fn get_tags(&self) -> Self::TagIter<'_>;
+}
+
+/// Implement [`Tagged`] for a type whose tags live in a `Vec` field.
+///
+/// The impl is always the same shape — a slice iterator, an emptiness check, and
+/// `.iter()` — and writing it by hand means writing a generic associated type with its
+/// `where` clause every time. This writes it for you:
+///
+/// ```
+/// # use tagbuddy::{generate_label, tagged};
+/// # use tagbuddy::tag::{PlainTag, Tagged};
+/// generate_label! { pub Tags {} }
+///
+/// struct Post<'brand> {
+///     tags: Vec<PlainTag<'brand, Tags>>,
+/// }
+///
+/// tagged!(Post<'brand> => PlainTag<'brand, Tags> { tags });
+/// ```
+///
+/// A type can carry several tag vocabularies by invoking this once per vocabulary, since
+/// each produces an impl for a different tag type. For anything that isn't a `Vec` field —
+/// a single tag, a map, a computed set — write the impl by hand; there's not much to it
+/// beyond the associated type.
+#[macro_export]
+macro_rules! tagged {
+    ($item:ident <$life:lifetime> => $tag:ty { $field:ident }) => {
+        impl<$life> $crate::tag::Tagged<$tag> for $item<$life> {
+            type TagIter<'__iter>
+                = ::core::slice::Iter<'__iter, $tag>
+            where
+                Self: '__iter;
+
+            fn has_tags(&self) -> bool {
+                !self.$field.is_empty()
+            }
+
+            fn get_tags(&self) -> Self::TagIter<'_> {
+                self.$field.iter()
+            }
+        }
+    };
+
+    ($item:ty => $tag:ty { $field:ident }) => {
+        impl $crate::tag::Tagged<$tag> for $item {
+            type TagIter<'__iter>
+                = ::core::slice::Iter<'__iter, $tag>
+            where
+                Self: '__iter;
+
+            fn has_tags(&self) -> bool {
+                !self.$field.is_empty()
+            }
+
+            fn get_tags(&self) -> Self::TagIter<'_> {
+                self.$field.iter()
+            }
+        }
+    };
 }

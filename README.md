@@ -4,24 +4,18 @@
 lightweight tags, supporting a flexible mechanism for parsing, storing, and
 querying data based on those tags.
 
-It is unfinished (querying is not yet implemented).
-
 ## Example
 
 ```rust
 use tagbuddy::brand::make_guard;
 use tagbuddy::parse::KeyValue;
 use tagbuddy::parse::KvPolicy;
-use tagbuddy::storage::DefaultStorage;
 use tagbuddy::TagManager;
 
 // `make_guard!` mints the brand for a storage. See below for what it buys.
 make_guard!(guard);
 
-let manager = TagManager::builder()
-    .parser(KeyValue::new(KvPolicy::NoAmbiguousSep))
-    .storage(DefaultStorage::fresh(guard))
-    .build();
+let manager = TagManager::new(guard, KeyValue::new(KvPolicy::NoAmbiguousSep));
 
 let tag = manager.parse_tag("score:5").unwrap();
 
@@ -33,6 +27,72 @@ A tag is a handful of interned keys, so it's cheap to copy, compare, and store.
 Parsers compose: `Plain`, `KeyValue`, and `Multipart` describe the shape of a
 tag, and adapters like `Trim`, `MaxChar`, `ChangeCase`, `Match`, and `Or` wrap
 them to normalize or reject input before it's interned.
+
+## Querying
+
+A query has two levels, because "items with this tag and that tag" and "one tag
+which is both of these things" are different questions. `Query` is a predicate
+over an item; `Match` is a predicate over a single tag.
+
+```rust
+use tagbuddy::brand::make_guard;
+use tagbuddy::parse::Plain;
+use tagbuddy::query::exact;
+use tagbuddy::tag::PlainTag;
+use tagbuddy::{tagged, TagManager};
+
+struct Post<'b> { title: &'static str, tags: Vec<PlainTag<'b>> }
+
+tagged!(Post<'b> => PlainTag<'b> { tags });
+
+make_guard!(guard);
+let manager = TagManager::new(guard, Plain::new());
+
+let tag = |s: &str| manager.parse_tag(s).unwrap();
+let posts = vec![
+    Post { title: "one", tags: vec![tag("rust"), tag("web")] },
+    Post { title: "two", tags: vec![tag("rust")] },
+];
+
+// Tagged `rust` but not `web`.
+let found: Vec<_> = manager
+    .select(&posts)
+    .matching(&(exact("rust") & !exact("web")))
+    .map(|post| post.title)
+    .collect();
+
+assert_eq!(found, ["two"]);
+```
+
+Matching is by key identity, not string comparison. Query strings are looked up
+with `Storage::get`, which does *not* intern — so a query can't permanently add
+its own search terms to the append-only storage it is searching, and a term that
+was never interned short-circuits to "matches nothing".
+
+Besides `exact` for plain tags there are `has_key` and `key_value` for key-value
+tags, `path` and `prefix` for multipart tags, and `Match::all_of`/`Match::any_of`
+to combine matches within a single tag. Value constraints cover an exact value, a
+set of them, a regex, and an arbitrary predicate — including `parses_to`, for
+"parses into this type and then satisfies this":
+
+```rust,ignore
+key_value("score", parses_to(|n: u32| n > 3)) | has_key("featured")
+```
+
+Queries combine with `&`, `|` and `!`, or with the `all`, `any` and `not`
+functions when building them programmatically.
+
+Each match targets one shape of tag, so `Match::Exact` never matches a key-value
+or multipart tag even when that tag's text is exactly the string given:
+`Exact("score:5")` doesn't match the key-value tag reading `score:5`, and
+`KeyValue` does. That's a consequence of matching on keys rather than text — a
+plain tag is a single key, while a key-value or multipart tag has no one key
+standing for its whole text.
+
+`select` scans, taking any iterable and allocating nothing. `index` builds an
+inverted index over a slice and answers from it, which is worth it from the
+second query onwards. The two are required to agree, which the test suite checks
+by generating queries and comparing both paths.
 
 ## A tag can't be resolved through the wrong storage
 
