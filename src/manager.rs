@@ -1,9 +1,13 @@
 //! Produce and resolve tags.
 
-use crate::error::ResolveError;
+use crate::error::ParseError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::parse::*;
+#[cfg(doc)]
+use crate::storage::Interner;
+use crate::storage::Key;
+use crate::storage::Spur;
 use crate::storage::Storage;
 use crate::tag::KeyValueSep;
 #[cfg(doc)]
@@ -13,36 +17,34 @@ use crate::tag::MultipartTag;
 use crate::tag::PathSep;
 use crate::tag::PlainTag;
 use crate::tag::Tag;
-use crate::{error::ParseError, tag::TagKind};
-#[cfg(doc)]
-use std::sync::Mutex;
-use std::{convert::identity, hash::BuildHasher};
-use string_interner::backend::Backend as InternerBackend;
-use string_interner::DefaultBackend;
-use string_interner::DefaultHashBuilder;
-use string_interner::DefaultSymbol;
-#[cfg(doc)]
-use string_interner::StringInterner;
-use string_interner::Symbol;
+use crate::tag::TagKind;
+use std::collections::hash_map::RandomState;
+use std::convert::identity;
+use std::hash::BuildHasher;
+use std::hash::Hash;
 use typed_builder::TypedBuilder;
 
 /// Constructs [`Tag`]s according to the configured parser and interner.
 ///
 /// A single [`TagManager`] is responsible for parsing and resolving tags that
-/// match the rules of a single configured parser, with storage handled by
-/// an underlying [`StringInterner`]. The [`StringInterner`] may be shared
-/// with other [`TagManager`]s.
+/// match the rules of a single configured parser, with storage handled by an
+/// underlying [`Interner`]. The [`Interner`] may be shared with other
+/// [`TagManager`]s, via [`Storage::share_as`].
 ///
 /// [`TagManager`] is designed to be generic over:
 ///
 /// - The parser used to produce tags.
-/// - The interner used to store tag data.
+/// - The key type and hasher used to store tag data.
 ///
-/// The trait bounds on [`TagManager`] ensure that the parser and interner
-/// agree on the [`Symbol`] used as handles for the stored string data.
-/// This is required because the parser produces [`Tag`]s which store
-/// [`Symbol`]s so they can later be resolved into [`String`]s to recover
-/// the full originally-input tag data.
+/// The trait bounds on [`TagManager`] ensure that the parser and storage agree
+/// on the [`Key`] used as a handle for the stored string data. This is required
+/// because the parser produces [`Tag`]s which store [`Key`]s so they can later
+/// be resolved back into [`String`]s to recover the full originally-input tag
+/// data.
+///
+/// Resolving through a [`TagManager`] can't fail. Its [`Storage`] carries a
+/// `'brand`, so a [`Tag`] can only be resolved through the storage that interned
+/// it, and an [`Interner`] is append-only, so a key it handed out stays valid.
 ///
 /// The manner in which tag data is stored depends on the `T` parameter.
 /// [`PlainTag`] stores the full string data in the interner. [`KeyValueTag`]
@@ -53,19 +55,18 @@ use typed_builder::TypedBuilder;
 /// be frequently repeated across tags, resulting in space savings from interning.
 #[derive(TypedBuilder)]
 pub struct TagManager<
+    'brand,
     L = DefaultLabel,
-    S = DefaultSymbol,
-    T = PlainTag<L, S>,
-    P = Plain<L, S>,
-    B = DefaultBackend<S>,
-    H = DefaultHashBuilder,
+    K = Spur,
+    T = PlainTag<'brand, L, K>,
+    P = Plain<L, K>,
+    H = RandomState,
 > where
     L: Label,
-    S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
-    B: InternerBackend<Symbol = S>,
-    H: BuildHasher,
+    K: Key + Hash,
+    T: Tag<'brand, Label = L, Key = K>,
+    P: Parser<'brand, Tag = T> + Send + Sync,
+    H: BuildHasher + Clone,
 {
     /// Defines how key-value tags are parsed, if key-value tags are permitted.
     pub(crate) parser: P,
@@ -79,57 +80,24 @@ pub struct TagManager<
     pub(crate) path_separator: PathSep,
 
     /// Interns and stores string data for tags, to reduce memory usage.
-    pub(crate) storage: Storage<L, B, H>,
-}
-
-// These `Send` and `Sync` impls are safe _because_:
-//
-// 1. `key_value_separator` and `path_separator` are just read-only string slices, so they are
-//    trivially `Send` and `Sync`.
-// 2. `parser` is constrained to be `Send` and `Sync`, either trivially-so, or by being wrapped
-//    in an `Arc<Mutex<_>>` (in which case it takes advantage of an auto-impl for `Parser`
-//    that tries to lock the parser before parsing can proceed).
-// 3. `storage` is _always_ wrapped in an `Arc<Mutex<_>>`, so it is always `Send` and `Sync`.
-//
-// Given the above, `TagManager` is _always_ safe to send and sync, and can implement these traits.
-
-unsafe impl<L, S, T, P, B, H> Send for TagManager<L, S, T, P, B, H>
-where
-    L: Label,
-    S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
-    B: InternerBackend<Symbol = S>,
-    H: BuildHasher,
-{
-}
-
-unsafe impl<L, S, T, P, B, H> Sync for TagManager<L, S, T, P, B, H>
-where
-    L: Label,
-    S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
-    B: InternerBackend<Symbol = S>,
-    H: BuildHasher,
-{
+    pub(crate) storage: Storage<'brand, L, K, H>,
 }
 
 impl<
+        'brand,
         L: Label,
-        S: Symbol,
-        T: Tag<Label = L, Symbol = S>,
-        P: Parser<Tag = T> + Send + Sync,
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
-    > TagManager<L, S, T, P, B, H>
+        K: Key + Hash,
+        T: Tag<'brand, Label = L, Key = K>,
+        P: Parser<'brand, Tag = T> + Send + Sync,
+        H: BuildHasher + Clone,
+    > TagManager<'brand, L, K, T, P, H>
 {
     /// Attempt to parse a structured tag from the provided "raw" tag.
     ///
     /// This may fail if the tag is empty, or if it violates the configured [`Parser`]'s rules.
     pub fn parse_tag(&self, raw: &str) -> Result<P::Tag, ParseError> {
         self.parser.parse(
-            &mut self.storage.lock()?,
+            &self.storage,
             self.key_value_separator,
             self.path_separator,
             raw,
@@ -137,9 +105,6 @@ impl<
     }
 
     /// Parse tags into a collection of your choosing.
-    ///
-    /// Note this can perform strictly better than `parse_tag`, because it takes the lock on the
-    /// storage before starting to parse _any_ tags, and holds it for the duration.
     pub fn parse_tags_into<'raw, C>(&self, src: impl IntoIterator<Item = &'raw str>) -> C
     where
         C: FromIterator<Result<P::Tag, ParseError>>,
@@ -147,10 +112,7 @@ impl<
         self.parse_tags_into_with(src, identity)
     }
 
-    /// Parse tags into a collection of your choosing.
-    ///
-    /// Note this can perform strictly better than `parse_tag`, because it takes the lock on the
-    /// storage before starting to parse _any_ tags, and holds it for the duration.
+    /// Parse tags into a collection of your choosing, pairing each with its [`TagKind`].
     pub fn parse_tags_into_with_kind<'raw, C>(&self, src: impl IntoIterator<Item = &'raw str>) -> C
     where
         C: FromIterator<Result<(P::Tag, TagKind), ParseError>>,
@@ -161,10 +123,7 @@ impl<
         })
     }
 
-    /// Parse tags into a collection of your choosing.
-    ///
-    /// Note this can perform strictly better than `parse_tag`, because it takes the lock on the
-    /// storage before starting to parse _any_ tags, and holds it for the duration.
+    /// Parse tags into a collection of your choosing, mapping each one as it's produced.
     pub fn parse_tags_into_with<'raw, O, C>(
         &self,
         src: impl IntoIterator<Item = &'raw str>,
@@ -174,10 +133,10 @@ impl<
         C: FromIterator<Result<O, ParseError>>,
     {
         src.into_iter()
-            .map(move |raw| {
+            .map(|raw| {
                 self.parser
                     .parse(
-                        &mut self.storage.lock()?,
+                        &self.storage,
                         self.key_value_separator,
                         self.path_separator,
                         raw,
@@ -189,32 +148,22 @@ impl<
 
     /// Get a string representation of a [`Tag`].
     ///
-    /// Note that this may fail to resolve a tag if the tag wasn't interned
-    /// in the current [`TagManager`]. It may alternatively resolve an incorrect tag.
-    pub fn resolve_tag(&self, tag: &P::Tag) -> Result<String, ResolveError> {
-        tag.resolve(
-            &self.storage.lock()?,
-            self.key_value_separator,
-            self.path_separator,
-        )
+    /// This can't fail: the tag's `'brand` means it was interned by this [`TagManager`]'s
+    /// [`Storage`], and an [`Interner`] never drops a key it handed out.
+    pub fn resolve_tag(&self, tag: &P::Tag) -> String {
+        tag.resolve(&self.storage, self.key_value_separator, self.path_separator)
     }
 
     /// Get the string representation of a set of [`Tag`]s.
-    ///
-    /// Note this can perform strictly better than `resolve_tag` because it takes the storage lock
-    /// before beginning iteration, and holds it for the duration.
     pub fn resolve_tags_into<'tag, C>(&self, src: impl IntoIterator<Item = &'tag P::Tag>) -> C
     where
         P::Tag: 'tag,
-        C: FromIterator<Result<String, ResolveError>>,
+        C: FromIterator<String>,
     {
         self.resolve_tags_into_with(src, identity)
     }
 
-    /// Get the string representation of a set of [`Tag`]s.
-    ///
-    /// Note this can perform strictly better than `resolve_tag` because it takes the storage lock
-    /// before beginning iteration, and holds it for the duration.
+    /// Get the string representation of a set of [`Tag`]s, mapping each one as it's resolved.
     pub fn resolve_tags_into_with<'tag, O, C>(
         &self,
         src: impl IntoIterator<Item = &'tag P::Tag>,
@@ -222,22 +171,15 @@ impl<
     ) -> C
     where
         P::Tag: 'tag,
-        C: FromIterator<Result<O, ResolveError>>,
+        C: FromIterator<O>,
     {
         src.into_iter()
-            .map(move |tag| {
-                tag.resolve(
-                    &self.storage.lock()?,
-                    self.key_value_separator,
-                    self.path_separator,
-                )
-                .map(f)
-            })
+            .map(|tag| f(tag.resolve(&self.storage, self.key_value_separator, self.path_separator)))
             .collect()
     }
 
     /// Get the inner [`Storage`] of the [`TagManager`].
-    pub fn storage(&self) -> &Storage<L, B, H> {
+    pub fn storage(&self) -> &Storage<'brand, L, K, H> {
         &self.storage
     }
 

@@ -1,21 +1,15 @@
 //! Errors for producing and consuming tags.
 
-#[cfg(doc)]
+#[cfg(all(doc, feature = "either"))]
 use crate::parse::Or;
-#[cfg(doc)]
-use crate::storage::Storage;
 #[cfg(doc)]
 use crate::tag::MultipartTag;
 #[cfg(doc)]
 use crate::tag::Tag;
-#[cfg(doc)]
-use crate::TagManager;
 use std::error::Error as StdError;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::fmt::Result as FmtResult;
-#[cfg(doc)]
-use std::sync::Mutex;
 
 /// Error arising during parsing of new [`Tag`]s.
 #[derive(Debug)]
@@ -48,17 +42,15 @@ pub enum ParseError {
     /// Tried to parse a single-part [`MultipartTag`].
     SinglePartMultipart,
 
-    /// Failed an [`Or`] match.
+    /// Tried to parse a [`MultipartTag`] with an empty part.
+    ///
+    /// A tag like `"a//b"`, `"/a"`, or `"a/"` has an empty part between or
+    /// beside its separators.
+    EmptyPart,
+
+    #[cfg_attr(feature = "either", doc = "Failed an [`Or`] match.")]
+    #[cfg_attr(not(feature = "either"), doc = "Failed an `Or` match.")]
     FailedOr(Box<ParseError>, Box<ParseError>),
-
-    /// An underlying storage error arose.
-    StorageError(StorageError),
-}
-
-impl From<StorageError> for ParseError {
-    fn from(e: StorageError) -> Self {
-        ParseError::StorageError(e)
-    }
 }
 
 impl Display for ParseError {
@@ -77,84 +69,12 @@ impl Display for ParseError {
             ParseError::SinglePartMultipart => {
                 write!(f, "can't accept a single-part multipart tag")
             }
+            ParseError::EmptyPart => write!(f, "empty part in a multipart tag"),
             ParseError::FailedOr(e1, e2) => {
                 write!(f, "failed two parsers with errors '{e1}' and '{e2}'")
             }
-            ParseError::StorageError(e) => write!(f, "{e}"),
         }
     }
 }
 
-impl StdError for ParseError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            ParseError::StorageError(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-/// Errors arising when resolving [`Tag`]s.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum ResolveError {
-    /// Tag wasn't found in the [`TagManager`].
-    TagNotFound,
-
-    /// Key wasn't found in the [`TagManager`].
-    KeyNotFound,
-
-    /// Value wasn't found in the [`TagManager`].
-    ValueNotFound,
-
-    /// Part wasn't found in the [`TagManager`].
-    PartNotFound,
-
-    /// An underlying [`Storage`] error occurred.
-    StorageError(StorageError),
-}
-
-impl From<StorageError> for ResolveError {
-    fn from(e: StorageError) -> Self {
-        ResolveError::StorageError(e)
-    }
-}
-
-impl Display for ResolveError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            ResolveError::TagNotFound => write!(f, "tag wasn't found in tag manager"),
-            ResolveError::KeyNotFound => write!(f, "key wasn't found in tag manager"),
-            ResolveError::ValueNotFound => write!(f, "value wasn't found in tag manager"),
-            ResolveError::PartNotFound => write!(f, "part wasn't found in tag manager"),
-            ResolveError::StorageError(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl StdError for ResolveError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            ResolveError::StorageError(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-/// Errors arising when interacting with [`Storage`]s.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum StorageError {
-    /// Failed to lock the storage, likely because the [`Mutex`] is poisoned.
-    CouldNotLock,
-}
-
-impl Display for StorageError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            StorageError::CouldNotLock => write!(f, "could not lock storage"),
-        }
-    }
-}
-
-impl StdError for StorageError {}
+impl StdError for ParseError {}

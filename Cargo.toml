@@ -3,6 +3,10 @@ name = "tagbuddy"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# Set by `generativity`, which uses edition 2024 and so needs 1.85. Nothing in
+# this crate's own code requires anything that recent -- GATs, the newest feature
+# it relies on, have been stable since 1.65.
+rust-version = "1.85"
 
 
 #============================================================================
@@ -19,6 +23,11 @@ optional = true
 version = "1.8.1"
 optional = true
 
+# Mints the unique invariant lifetimes used to brand a `Storage`, so tags can
+# only ever be resolved through the storage that interned them.
+[dependencies.generativity]
+version = "1.2.1"
+
 [dependencies.itertools]
 version = "0.11.0"
 
@@ -26,11 +35,12 @@ version = "0.11.0"
 version = "1.8.4"
 optional = true
 
-[dependencies.string-interner]
-version = "0.14.0"
-default-features = false
-# Omit the `serde` dependency to improve compilation speed.
-features = ["std", "inline-more", "backends"]
+# A concurrent, append-only string interner. `ThreadedRodeo` interns and resolves
+# through `&self`, so tag storage needs no lock, and it exposes no `&mut` API at
+# all -- no `clear`, no `remove` -- which is what makes symbols valid forever.
+[dependencies.lasso]
+version = "0.7.3"
+features = ["multi-threaded", "inline-more"]
 
 [dependencies.typed-builder]
 version = "0.14.0"

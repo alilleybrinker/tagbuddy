@@ -1,47 +1,46 @@
 #![allow(dead_code)]
 
+use crate::storage::Key;
 use crate::{label::Label, parse::Parser, tag::Tag, TagManager};
+use std::hash::Hash;
 use std::{collections::BTreeMap, hash::BuildHasher, marker::PhantomData};
-use string_interner::backend::Backend as InternerBackend;
-use string_interner::Symbol;
 
-struct QueryBuilder<'m, L, S, T, P, B, H>
+struct QueryBuilder<'m, 'brand, L, K, T, P, H>
 where
     L: Label,
-    S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
-    B: InternerBackend<Symbol = S>,
-    H: BuildHasher,
+    K: Key + Hash,
+    T: Tag<'brand, Label = L, Key = K>,
+    P: Parser<'brand, Tag = T> + Send + Sync,
+    H: BuildHasher + Clone,
 {
-    manager: &'m TagManager<L, S, T, P, B, H>,
-    indices: QueryIndices<S>,
+    manager: &'m TagManager<'brand, L, K, T, P, H>,
+    indices: QueryIndices<K>,
 }
 
-struct QueryIndices<S>
+struct QueryIndices<K>
 where
-    S: Symbol,
+    K: Key + Hash,
 {
-    plain: PlainIndex<S>,
-    key_value: KeyValueIndex<S>,
-    multipart: MultipartIndex<S>,
+    plain: PlainIndex<K>,
+    key_value: KeyValueIndex<K>,
+    multipart: MultipartIndex<K>,
 }
 
-struct PlainIndex<S>(Vec<S>)
+struct PlainIndex<K>(Vec<K>)
 where
-    S: Symbol;
+    K: Key + Hash;
 
-struct KeyValueIndex<S>(BTreeMap<S, Vec<S>>)
+struct KeyValueIndex<K>(BTreeMap<K, Vec<K>>)
 where
-    S: Symbol;
+    K: Key + Hash;
 
-struct MultipartIndex<S>(Vec<Trie<S>>)
+struct MultipartIndex<K>(Vec<Trie<K>>)
 where
-    S: Symbol;
+    K: Key + Hash;
 
-struct Trie<S>(PhantomData<S>)
+struct Trie<K>(PhantomData<K>)
 where
-    S: Symbol;
+    K: Key + Hash;
 
 /*
 The basic design of the query system is:
