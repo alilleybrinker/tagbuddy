@@ -90,6 +90,13 @@ combine matches within a single tag. Value constraints cover an exact value, a
 set of them, a regex, and an arbitrary predicate — including `parses_to`, for
 "parses into this type and then satisfies this".
 
+Each match targets one shape of tag, so `Match::Exact` never matches a key-value
+or multipart tag even when that tag's text is exactly the string given:
+`Exact("score:5")` doesn't match the key-value tag reading `score:5`, and
+`KeyValue` does. That's a consequence of matching on keys rather than text — a
+plain tag is a single key, while a key-value or multipart tag has no one key
+standing for its whole text.
+
 `select` scans, taking any iterable and allocating nothing. `index` builds an
 inverted index over a slice and answers from it, which is worth it from the
 second query onwards. The two are required to agree, which the test suite checks

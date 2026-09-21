@@ -15,11 +15,29 @@
 //! storage it's searching. A string that was never interned can't be on any tag, so it
 //! matches nothing, and the surrounding query short-circuits.
 //!
-//! Because matching is by identity, the match constructors are per tag shape:
+//! # Matches are per tag shape
+//!
+//! Because matching is by identity, each constructor targets one shape of tag:
 //! [`Match::Exact`] is about [`PlainTag`]s, [`Match::HasKey`] and [`Match::KeyValue`] about
 //! [`KeyValueTag`]s, and [`Match::Path`] and [`Match::Prefix`] about [`MultipartTag`]s. A
-//! manager whose parser produces a mix (via the `Or` adapter) can be queried with all
-//! of them.
+//! manager whose parser produces a mix (via the `Or` adapter) can be queried with all of
+//! them, and each still only matches its own shape.
+//!
+//! The consequence worth knowing is that **[`Match::Exact`] never matches a key-value or
+//! multipart tag, even when that tag's text is exactly the string you asked for.**
+//! `Match::Exact("score:5")` does not match the key-value tag that resolves to `"score:5"`;
+//! [`Match::KeyValue`] does. `Match::Exact("a/b")` does not match the multipart tag that
+//! resolves to `"a/b"`; [`Match::Path`] does.
+//!
+//! That falls out of matching on keys rather than text. A plain tag is one key, so asking
+//! whether it equals a string is one integer comparison. A key-value or multipart tag has
+//! no single key standing for its whole text — the text only exists once the parts are
+//! resolved and joined with the manager's separators — so an `Exact` over them would have
+//! to resolve and compare strings, which is the cost the whole design avoids. Naming the
+//! shape you mean is also more precise: with a shared interner, `"score"` can be a plain
+//! tag, the key half of `score:5`, and the first part of `score/high` all at once, and
+//! those are the same key. [`Match::Exact`], [`Match::HasKey`] and [`Match::Prefix`] tell
+//! them apart by shape.
 //!
 //! # Two ways to run one
 //!
@@ -93,7 +111,13 @@ pub enum Query {
 pub enum Match {
     /// A [`PlainTag`] whose whole content is this string.
     ///
+    /// Only plain tags. This does *not* match a [`KeyValueTag`] or [`MultipartTag`] whose
+    /// text happens to equal the string: use [`Match::KeyValue`] or [`Match::Path`] for
+    /// those. See the module documentation for why.
+    ///
     /// [`PlainTag`]: crate::tag::PlainTag
+    /// [`KeyValueTag`]: crate::tag::KeyValueTag
+    /// [`MultipartTag`]: crate::tag::MultipartTag
     Exact(String),
 
     /// A [`KeyValueTag`] with this key, whatever its value.
@@ -112,6 +136,10 @@ pub enum Match {
     },
 
     /// A [`MultipartTag`] whose parts are exactly these.
+    ///
+    /// This is the multipart equivalent of [`Match::Exact`], which doesn't match multipart
+    /// tags. Note the parts are given separately rather than as one separator-joined
+    /// string, because each part is interned on its own.
     ///
     /// [`MultipartTag`]: crate::tag::MultipartTag
     Path(Vec<String>),

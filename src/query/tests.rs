@@ -527,3 +527,112 @@ fn leaf_text(q: &Query) -> String {
         _ => unreachable!("only called on exact leaves"),
     }
 }
+
+#[test]
+#[cfg(feature = "either")]
+fn exact_only_matches_plain_tags() {
+    use crate::parse::Or;
+    use crate::tag::KeyValueTag;
+    use crate::tag::MultipartTag;
+    use either::Either;
+
+    make_guard!(guard);
+    let manager = TagManager::builder()
+        .parser(Or(
+            Multipart::new(MultipartPolicy::RequireMultipart),
+            Or(KeyValue::new(KvPolicy::NoAmbiguousSep), Plain::new()),
+        ))
+        .storage(DefaultStorage::fresh(guard))
+        .build();
+
+    type MixedTag<'brand> =
+        Either<MultipartTag<'brand>, Either<KeyValueTag<'brand>, PlainTag<'brand>>>;
+
+    struct Mixed<'brand> {
+        name: &'static str,
+        tags: Vec<MixedTag<'brand>>,
+    }
+
+    impl<'brand> Tagged<'brand, MixedTag<'brand>> for Mixed<'brand> {
+        type TagIter<'iter>
+            = Iter<'iter, MixedTag<'brand>>
+        where
+            Self: 'iter;
+
+        fn has_tags(&self) -> bool {
+            !self.tags.is_empty()
+        }
+
+        fn get_tags(&self) -> Self::TagIter<'_> {
+            self.tags.iter()
+        }
+    }
+
+    let tag = |s: &str| {
+        manager
+            .parse_tag(s)
+            .expect("parses under some branch of the Or")
+    };
+
+    // All three tags intern the very same key for "score": the plain tag's whole content,
+    // the key-value tag's key half, and the multipart tag's first part. So if matching
+    // discriminated on keys alone rather than on tag shape, these would be confusable.
+    let items = vec![
+        Mixed {
+            name: "plain",
+            tags: vec![tag("score")],
+        },
+        Mixed {
+            name: "key-value",
+            tags: vec![tag("score:5")],
+        },
+        Mixed {
+            name: "multipart",
+            tags: vec![tag("score/high")],
+        },
+    ];
+
+    let names = |q: &Query| -> Vec<&'static str> {
+        manager.select(&items).matching(q).map(|i| i.name).collect()
+    };
+
+    // Each matcher picks out its own tag shape, and only that one.
+    assert_eq!(
+        names(&contains(Match::Exact("score".to_owned()))),
+        ["plain"]
+    );
+    assert_eq!(
+        names(&contains(Match::HasKey("score".to_owned()))),
+        ["key-value"]
+    );
+    assert_eq!(
+        names(&contains(Match::Prefix(vec!["score".to_owned()]))),
+        ["multipart"]
+    );
+
+    // `Exact` is about plain tags, so it never matches a key-value or multipart tag, even
+    // when the tag's *text* is exactly the string asked for.
+    assert_eq!(manager.resolve_tag(&items[1].tags[0]), "score:5");
+    assert_eq!(manager.resolve_tag(&items[2].tags[0]), "score/high");
+    assert_eq!(
+        names(&contains(Match::Exact("score:5".to_owned()))),
+        [] as [&str; 0]
+    );
+    assert_eq!(
+        names(&contains(Match::Exact("score/high".to_owned()))),
+        [] as [&str; 0]
+    );
+
+    for query in [
+        contains(Match::Exact("score".to_owned())),
+        contains(Match::Exact("score:5".to_owned())),
+        contains(Match::HasKey("score".to_owned())),
+    ] {
+        let from_index: Vec<_> = manager
+            .index(&items)
+            .matching(&query)
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(from_index, names(&query), "index disagreed with scan");
+    }
+}
