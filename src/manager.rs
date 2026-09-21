@@ -4,6 +4,8 @@ use crate::error::ParseError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::parse::*;
+use crate::query::Index;
+use crate::query::Scan;
 #[cfg(doc)]
 use crate::storage::Interner;
 use crate::storage::Key;
@@ -18,6 +20,7 @@ use crate::tag::PathSep;
 use crate::tag::PlainTag;
 use crate::tag::Tag;
 use crate::tag::TagKind;
+use crate::tag::Tagged;
 use std::collections::hash_map::RandomState;
 use std::convert::identity;
 use std::hash::BuildHasher;
@@ -176,6 +179,69 @@ impl<
         src.into_iter()
             .map(|tag| f(tag.resolve(&self.storage, self.key_value_separator, self.path_separator)))
             .collect()
+    }
+
+    /// Select items to run queries against by scanning them.
+    ///
+    /// Takes anything iterable, borrows rather than collects, and costs one pass per
+    /// query. Use [`TagManager::index`] instead when the same items are queried more than
+    /// once.
+    ///
+    /// ```
+    /// # use tagbuddy::brand::make_guard;
+    /// # use tagbuddy::parse::Plain;
+    /// # use tagbuddy::query::{contains, Match};
+    /// # use tagbuddy::storage::DefaultStorage;
+    /// # use tagbuddy::tag::{PlainTag, Tagged};
+    /// # use tagbuddy::TagManager;
+    /// # use std::slice::Iter;
+    /// # struct Post<'b>(Vec<PlainTag<'b>>);
+    /// # impl<'b> Tagged<'b, PlainTag<'b>> for Post<'b> {
+    /// #     type TagIter<'i> = Iter<'i, PlainTag<'b>> where Self: 'i;
+    /// #     fn has_tags(&self) -> bool { !self.0.is_empty() }
+    /// #     fn get_tags(&self) -> Self::TagIter<'_> { self.0.iter() }
+    /// # }
+    /// make_guard!(guard);
+    /// let manager = TagManager::builder()
+    ///     .parser(Plain::new())
+    ///     .storage(DefaultStorage::fresh(guard))
+    ///     .build();
+    ///
+    /// let posts = vec![
+    ///     Post(vec![manager.parse_tag("rust").unwrap()]),
+    ///     Post(vec![manager.parse_tag("go").unwrap()]),
+    /// ];
+    ///
+    /// let found = manager
+    ///     .select(&posts)
+    ///     .matching(&contains(Match::Exact("rust".to_owned())))
+    ///     .count();
+    ///
+    /// assert_eq!(found, 1);
+    /// ```
+    pub fn select<Items>(&self, items: Items) -> Scan<'_, 'brand, L, K, T, P, H, Items> {
+        Scan {
+            manager: self,
+            items,
+        }
+    }
+
+    /// Build a reusable inverted index over `items`.
+    ///
+    /// Requires a slice, because the index maps tags to item *positions*. Building costs
+    /// about what one [`TagManager::select`] pass costs, so this pays off from the second
+    /// query onwards.
+    ///
+    /// The index borrows `items`, so it can't be left holding stale positions: the
+    /// collection can't change while the index is alive.
+    pub fn index<'m, 'items, I>(
+        &'m self,
+        items: &'items [I],
+    ) -> Index<'m, 'brand, 'items, L, K, T, P, H, I>
+    where
+        I: Tagged<'brand, T>,
+    {
+        Index::build(self, items)
     }
 
     /// Get the inner [`Storage`] of the [`TagManager`].

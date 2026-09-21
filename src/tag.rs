@@ -19,6 +19,48 @@ use std::hash::BuildHasher;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
+/// A structured view of the [`Key`]s inside a [`Tag`].
+///
+/// [`Tag::resolve`] can turn a tag back into a string, but a query engine needs to see a
+/// tag's *keys* rather than its text: matching by key identity is a integer comparison,
+/// where matching by text would mean resolving every tag on every comparison. This is how
+/// a [`Tag`] exposes that, uniformly across tag kinds, so that code which works over tags
+/// generically — queries especially — doesn't have to know which concrete type it holds.
+///
+/// A [`Tag`] implementation outside this crate that doesn't fit any of these shapes should
+/// return [`TagParts::Opaque`], which matching treats as "matches nothing structurally".
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum TagParts<'tag, K> {
+    /// The single key of a [`PlainTag`].
+    Plain(K),
+
+    /// The separately-interned key and value of a [`KeyValueTag`].
+    KeyValue {
+        /// The key half.
+        key: K,
+        /// The value half.
+        value: K,
+    },
+
+    /// The parts of a [`MultipartTag`], in order.
+    Multipart(&'tag [K]),
+
+    /// A tag whose internals this crate can't see into.
+    Opaque,
+}
+
+impl<K> TagParts<'_, K> {
+    /// Get the [`TagKind`] these parts correspond to.
+    pub fn kind(&self) -> TagKind {
+        match self {
+            TagParts::Plain(_) => TagKind::Plain,
+            TagParts::KeyValue { .. } => TagKind::KeyValue,
+            TagParts::Multipart(_) => TagKind::Multipart,
+            TagParts::Opaque => TagKind::Other,
+        }
+    }
+}
+
 /// A trait defining a [`Tag`] which contains interned data.
 ///
 /// The _only_ defining operation of a [`Tag`] is that it can be
@@ -39,6 +81,11 @@ pub trait Tag<'brand> {
 
     /// Get the [`TagKind`] of the current tag.
     fn kind(&self) -> TagKind;
+
+    /// Get a structured view of the [`Key`]s this tag holds.
+    ///
+    /// See [`TagParts`] for why this exists alongside [`Tag::resolve`].
+    fn parts(&self) -> TagParts<'_, Self::Key>;
 
     /// Resolve a [`Tag`] back into a [`String`].
     ///
@@ -86,6 +133,13 @@ where
         match self {
             Either::Left(t) => t.kind(),
             Either::Right(t) => t.kind(),
+        }
+    }
+
+    fn parts(&self) -> TagParts<'_, Self::Key> {
+        match self {
+            Either::Left(t) => t.parts(),
+            Either::Right(t) => t.parts(),
         }
     }
 }
@@ -150,6 +204,10 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for PlainTag<'brand, L, K> {
 
     fn kind(&self) -> TagKind {
         TagKind::Plain
+    }
+
+    fn parts(&self) -> TagParts<'_, Self::Key> {
+        TagParts::Plain(self.0)
     }
 }
 
@@ -228,6 +286,13 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for KeyValueTag<'brand, L, K> 
 
     fn kind(&self) -> TagKind {
         TagKind::KeyValue
+    }
+
+    fn parts(&self) -> TagParts<'_, Self::Key> {
+        TagParts::KeyValue {
+            key: self.0,
+            value: self.1,
+        }
     }
 }
 
@@ -322,6 +387,10 @@ impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for MultipartTag<'brand, L, K>
 
     fn kind(&self) -> TagKind {
         TagKind::Multipart
+    }
+
+    fn parts(&self) -> TagParts<'_, Self::Key> {
+        TagParts::Multipart(&self.0)
     }
 }
 

@@ -4,8 +4,6 @@
 lightweight tags, supporting a flexible mechanism for parsing, storing, and
 querying data based on those tags.
 
-It is unfinished (querying is not yet implemented).
-
 ## Example
 
 ```rust
@@ -33,6 +31,69 @@ A tag is a handful of interned keys, so it's cheap to copy, compare, and store.
 Parsers compose: `Plain`, `KeyValue`, and `Multipart` describe the shape of a
 tag, and adapters like `Trim`, `MaxChar`, `ChangeCase`, `Match`, and `Or` wrap
 them to normalize or reject input before it's interned.
+
+## Querying
+
+A query has two levels, because "items with this tag and that tag" and "one tag
+which is both of these things" are different questions. `Query` is a predicate
+over an item; `Match` is a predicate over a single tag.
+
+```rust
+use tagbuddy::brand::make_guard;
+use tagbuddy::parse::Plain;
+use tagbuddy::query::{all, contains, not, Match};
+use tagbuddy::storage::DefaultStorage;
+use tagbuddy::tag::{PlainTag, Tagged};
+use tagbuddy::TagManager;
+use std::slice::Iter;
+
+struct Post<'b> { title: &'static str, tags: Vec<PlainTag<'b>> }
+
+impl<'b> Tagged<'b, PlainTag<'b>> for Post<'b> {
+    type TagIter<'i> = Iter<'i, PlainTag<'b>> where Self: 'i;
+    fn has_tags(&self) -> bool { !self.tags.is_empty() }
+    fn get_tags(&self) -> Self::TagIter<'_> { self.tags.iter() }
+}
+
+make_guard!(guard);
+let manager = TagManager::builder()
+    .parser(Plain::new())
+    .storage(DefaultStorage::fresh(guard))
+    .build();
+
+let tag = |s: &str| manager.parse_tag(s).unwrap();
+let posts = vec![
+    Post { title: "one", tags: vec![tag("rust"), tag("web")] },
+    Post { title: "two", tags: vec![tag("rust")] },
+];
+
+let exact = |s: &str| contains(Match::Exact(s.to_owned()));
+
+// Tagged `rust` but not `web`.
+let found: Vec<_> = manager
+    .select(&posts)
+    .matching(&all([exact("rust"), not(exact("web"))]))
+    .map(|post| post.title)
+    .collect();
+
+assert_eq!(found, ["two"]);
+```
+
+Matching is by key identity, not string comparison. Query strings are looked up
+with `Storage::get`, which does *not* intern — so a query can't permanently add
+its own search terms to the append-only storage it is searching, and a term that
+was never interned short-circuits to "matches nothing".
+
+Besides `Match::Exact` for plain tags there are `HasKey` and `KeyValue` for
+key-value tags, `Path` and `Prefix` for multipart tags, and `Any`/`All` to
+combine matches within a single tag. Value constraints cover an exact value, a
+set of them, a regex, and an arbitrary predicate — including `parses_to`, for
+"parses into this type and then satisfies this".
+
+`select` scans, taking any iterable and allocating nothing. `index` builds an
+inverted index over a slice and answers from it, which is worth it from the
+second query onwards. The two are required to agree, which the test suite checks
+by generating queries and comparing both paths.
 
 ## A tag can't be resolved through the wrong storage
 
