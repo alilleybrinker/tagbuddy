@@ -1,19 +1,15 @@
 //! Evaluating a query from an inverted index built over a slice of items.
 
-use crate::label::Label;
-use crate::parse::Parser;
 use crate::query::scan::matches_tag;
 use crate::query::Query;
 use crate::query::Resolved;
 use crate::query::ResolvedMatch;
 use crate::query::ResolvedValue;
 use crate::storage::Key;
-use crate::tag::Tag;
 use crate::tag::TagParts;
 use crate::tag::Tagged;
-use crate::TagManager;
+use crate::ManagerParts;
 use std::collections::HashMap;
-use std::hash::BuildHasher;
 use std::hash::Hash;
 
 /// Where an item sits in the indexed slice.
@@ -29,28 +25,24 @@ type Pos = u32;
 ///
 /// [`Scan`]: crate::query::Scan
 /// [`TagManager::index`]: crate::TagManager::index
-pub struct Index<'m, 'brand, 'items, L, K, T, P, H, I>
+pub struct Index<'m, 'items, M, I>
 where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
-    H: BuildHasher + Clone,
+    M: ManagerParts,
 {
-    manager: &'m TagManager<'brand, L, K, T, P, H>,
+    manager: &'m M,
     items: &'items [I],
 
     /// Plain tag key to the items carrying it.
-    plain: HashMap<K, Vec<Pos>>,
+    plain: HashMap<M::Key, Vec<Pos>>,
 
     /// Key-value tag's key to the items carrying a tag with that key.
-    kv_key: HashMap<K, Vec<Pos>>,
+    kv_key: HashMap<M::Key, Vec<Pos>>,
 
     /// Key-value tag's exact (key, value) to the items carrying it.
-    kv_pair: HashMap<(K, K), Vec<Pos>>,
+    kv_pair: HashMap<(M::Key, M::Key), Vec<Pos>>,
 
     /// Multipart tags, as a trie over their parts.
-    paths: Trie<K>,
+    paths: Trie<M::Key>,
 
     /// Every position, for `Not`.
     all: Vec<Pos>,
@@ -136,20 +128,13 @@ impl Candidates {
     }
 }
 
-impl<'m, 'brand, 'items, L, K, T, P, H, I> Index<'m, 'brand, 'items, L, K, T, P, H, I>
+impl<'m, 'items, M, I> Index<'m, 'items, M, I>
 where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
-    H: BuildHasher + Clone,
-    I: Tagged<'brand, T>,
+    M: ManagerParts,
+    I: Tagged<M::Tag>,
 {
     /// Build an index over `items`.
-    pub(crate) fn build(
-        manager: &'m TagManager<'brand, L, K, T, P, H>,
-        items: &'items [I],
-    ) -> Self {
+    pub(crate) fn build(manager: &'m M, items: &'items [I]) -> Self {
         let mut index = Index {
             manager,
             items,
@@ -169,7 +154,7 @@ where
             }
 
             for tag in item.get_tags() {
-                match tag.parts() {
+                match M::parts_of(tag) {
                     TagParts::Plain(k) => index.plain.entry(k).or_default().push(pos),
                     TagParts::KeyValue { key, value } => {
                         index.kv_key.entry(key).or_default().push(pos);
@@ -204,11 +189,8 @@ where
     }
 
     /// Keep the items satisfying `query`.
-    pub fn matching(
-        &self,
-        query: &Query,
-    ) -> impl Iterator<Item = &'items I> + use<'items, L, K, T, P, H, I> {
-        let resolved = Resolved::new(query, self.manager.storage());
+    pub fn matching(&self, query: &Query) -> impl Iterator<Item = &'items I> + use<'items, M, I> {
+        let resolved = Resolved::new(query, self.manager);
         let positions = self.positions(&resolved);
         let items = self.items;
 
@@ -216,7 +198,7 @@ where
     }
 
     /// Positions of the items satisfying a resolved query.
-    fn positions(&self, query: &Resolved<K>) -> Vec<Pos> {
+    fn positions(&self, query: &Resolved<M::Key>) -> Vec<Pos> {
         match query {
             Resolved::Anything => self.all.clone(),
 
@@ -241,7 +223,7 @@ where
     }
 
     /// Candidate positions for a resolved match.
-    fn candidates(&self, m: &ResolvedMatch<K>) -> Candidates {
+    fn candidates(&self, m: &ResolvedMatch<M::Key>) -> Candidates {
         match m {
             ResolvedMatch::Never => Candidates::exact(Vec::new()),
 
@@ -300,15 +282,13 @@ where
     }
 
     /// Check candidate positions against the authoritative per-tag matcher.
-    fn confirm(&self, candidates: Vec<Pos>, m: &ResolvedMatch<K>) -> Vec<Pos> {
-        let storage = self.manager.storage();
-
+    fn confirm(&self, candidates: Vec<Pos>, m: &ResolvedMatch<M::Key>) -> Vec<Pos> {
         candidates
             .into_iter()
             .filter(|pos| {
                 self.items[*pos as usize]
                     .get_tags()
-                    .any(|tag| matches_tag(&tag.parts(), m, storage))
+                    .any(|tag| matches_tag(&M::parts_of(tag), m, self.manager))
             })
             .collect()
     }

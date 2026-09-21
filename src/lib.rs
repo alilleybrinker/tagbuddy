@@ -51,6 +51,7 @@ pub mod tag;
 #[cfg(test)]
 mod test;
 
+pub use crate::manager::ManagerParts;
 pub use crate::manager::TagManager;
 
 pub mod builder {

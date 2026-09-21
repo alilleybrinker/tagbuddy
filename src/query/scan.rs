@@ -1,46 +1,34 @@
 //! Evaluating a query by walking items, without building an index.
 
-use crate::label::Label;
-use crate::parse::Parser;
+use crate::query::Query;
 use crate::query::Resolved;
 use crate::query::ResolvedMatch;
 use crate::query::ResolvedValue;
-use crate::storage::Key;
-use crate::storage::Storage;
-use crate::tag::Tag;
 use crate::tag::TagParts;
 use crate::tag::Tagged;
-use crate::TagManager;
-use std::hash::BuildHasher;
-use std::hash::Hash;
+use crate::ManagerParts;
 
 /// A set of items to run a [`Query`] against, one pass at a time.
 ///
 /// Produced by [`TagManager::select`]. Holds no index and allocates nothing; each query
 /// costs one walk of the items.
 ///
-/// [`Query`]: crate::query::Query
 /// [`TagManager::select`]: crate::TagManager::select
-pub struct Scan<'m, 'brand, L, K, T, P, H, Items>
-where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    P: Parser<'brand, Tag = T> + Send + Sync,
-    H: BuildHasher + Clone,
-{
-    pub(crate) manager: &'m TagManager<'brand, L, K, T, P, H>,
-    pub(crate) items: Items,
+pub struct Scan<'m, M, Items> {
+    manager: &'m M,
+    items: Items,
 }
 
-impl<'m, 'brand, 'items, L, K, T, P, H, I, Items> Scan<'m, 'brand, L, K, T, P, H, Items>
+impl<'m, M, Items> Scan<'m, M, Items> {
+    pub(crate) fn new(manager: &'m M, items: Items) -> Self {
+        Scan { manager, items }
+    }
+}
+
+impl<'m, 'items, M, I, Items> Scan<'m, M, Items>
 where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K> + 'items,
-    P: Parser<'brand, Tag = T> + Send + Sync,
-    H: BuildHasher + Clone,
-    I: Tagged<'brand, T> + 'items,
+    M: ManagerParts,
+    I: Tagged<M::Tag> + 'items,
     Items: IntoIterator<Item = &'items I>,
 {
     /// Keep the items satisfying `query`.
@@ -49,39 +37,31 @@ where
     /// into the caller's own collection rather than copies.
     pub fn matching(
         self,
-        query: &crate::query::Query,
-    ) -> impl Iterator<Item = &'items I> + use<'items, 'brand, L, K, T, P, H, I, Items> {
-        let storage = self.manager.storage();
-        let resolved = Resolved::new(query, storage);
-        let storage = storage.share_as::<L>();
+        query: &Query,
+    ) -> impl Iterator<Item = &'items I> + use<'m, 'items, M, I, Items> {
+        let manager = self.manager;
+        let resolved = Resolved::new(query, manager);
 
         self.items
             .into_iter()
-            .filter(move |item| matches_item(*item, &resolved, &storage))
+            .filter(move |item| matches_item(*item, &resolved, manager))
     }
 }
 
 /// Test one item against a resolved query.
-pub(crate) fn matches_item<'brand, L, K, T, H, I>(
-    item: &I,
-    query: &Resolved<K>,
-    storage: &Storage<'brand, L, K, H>,
-) -> bool
+pub(crate) fn matches_item<M, I>(item: &I, query: &Resolved<M::Key>, manager: &M) -> bool
 where
-    L: Label,
-    K: Key + Hash,
-    T: Tag<'brand, Label = L, Key = K>,
-    H: BuildHasher + Clone,
-    I: Tagged<'brand, T>,
+    M: ManagerParts,
+    I: Tagged<M::Tag>,
 {
     match query {
         Resolved::Anything => true,
         Resolved::Contains(m) => item
             .get_tags()
-            .any(|tag| matches_tag(&tag.parts(), m, storage)),
-        Resolved::All(qs) => qs.iter().all(|q| matches_item(item, q, storage)),
-        Resolved::Any(qs) => qs.iter().any(|q| matches_item(item, q, storage)),
-        Resolved::Not(q) => !matches_item(item, q, storage),
+            .any(|tag| matches_tag(&M::parts_of(tag), m, manager)),
+        Resolved::All(qs) => qs.iter().all(|q| matches_item(item, q, manager)),
+        Resolved::Any(qs) => qs.iter().any(|q| matches_item(item, q, manager)),
+        Resolved::Not(q) => !matches_item(item, q, manager),
     }
 }
 
@@ -92,15 +72,13 @@ where
 /// can't drift apart on semantics.
 ///
 /// [`Match`]: crate::query::Match
-pub(crate) fn matches_tag<'brand, L, K, H>(
-    parts: &TagParts<'_, K>,
-    m: &ResolvedMatch<K>,
-    storage: &Storage<'brand, L, K, H>,
+pub(crate) fn matches_tag<M>(
+    parts: &TagParts<'_, M::Key>,
+    m: &ResolvedMatch<M::Key>,
+    manager: &M,
 ) -> bool
 where
-    L: Label,
-    K: Key + Hash,
-    H: BuildHasher + Clone,
+    M: ManagerParts,
 {
     match m {
         ResolvedMatch::Never => false,
@@ -113,7 +91,7 @@ where
 
         ResolvedMatch::KeyValue { key: want, value } => match parts {
             TagParts::KeyValue { key, value: got } if key == want => {
-                matches_value(*got, value, storage)
+                matches_value(*got, value, manager)
             }
             _ => false,
         },
@@ -126,21 +104,15 @@ where
             matches!(parts, TagParts::Multipart(got) if got.starts_with(want))
         }
 
-        ResolvedMatch::All(ms) => ms.iter().all(|m| matches_tag(parts, m, storage)),
-        ResolvedMatch::Any(ms) => ms.iter().any(|m| matches_tag(parts, m, storage)),
+        ResolvedMatch::All(ms) => ms.iter().all(|m| matches_tag(parts, m, manager)),
+        ResolvedMatch::Any(ms) => ms.iter().any(|m| matches_tag(parts, m, manager)),
     }
 }
 
 /// Test one key-value tag's value against a resolved value constraint.
-fn matches_value<'brand, L, K, H>(
-    got: K,
-    value: &ResolvedValue<K>,
-    storage: &Storage<'brand, L, K, H>,
-) -> bool
+fn matches_value<M>(got: M::Key, value: &ResolvedValue<M::Key>, manager: &M) -> bool
 where
-    L: Label,
-    K: Key + Hash,
-    H: BuildHasher + Clone,
+    M: ManagerParts,
 {
     match value {
         ResolvedValue::Never => false,
@@ -149,10 +121,10 @@ where
         ResolvedValue::Is(want) => got == *want,
         ResolvedValue::OneOf(wants) => wants.contains(&got),
 
-        // These two need the text, so they pay a resolve. It's cheap and lock-free, but
+        // These two need the text, so they pay a lookup. It's cheap and lock-free, but
         // it's also why they can't be answered from an index.
         #[cfg(feature = "regex")]
-        ResolvedValue::Matches(r) => r.is_match(storage.resolve(got)),
-        ResolvedValue::Passes(p) => p.test(storage.resolve(got)),
+        ResolvedValue::Matches(r) => r.is_match(manager.text(got)),
+        ResolvedValue::Passes(p) => p.test(manager.text(got)),
     }
 }

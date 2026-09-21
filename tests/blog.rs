@@ -126,7 +126,7 @@ pub mod blog {
     }
 
     // Mark a blog post as being tagged with tags.
-    impl<'brand> Tagged<'brand, PlainTag<'brand, Tags>> for BlogPost<'brand> {
+    impl<'brand> Tagged<PlainTag<'brand, Tags>> for BlogPost<'brand> {
         type TagIter<'iter>
             = SliceIter<'iter, PlainTag<'brand, Tags>>
         where
@@ -142,7 +142,7 @@ pub mod blog {
     }
 
     // Mark a blog post as being tagged with a rating.
-    impl<'brand> Tagged<'brand, KeyValueTag<'brand, Ratings>> for BlogPost<'brand> {
+    impl<'brand> Tagged<KeyValueTag<'brand, Ratings>> for BlogPost<'brand> {
         type TagIter<'iter>
             = OnceIter<&'iter KeyValueTag<'brand, Ratings>>
         where

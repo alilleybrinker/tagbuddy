@@ -454,7 +454,20 @@ pub enum TagKind {
 ///
 /// This trait is generic over the tag type, to permit implementing
 /// it for multiple types of tags.
-pub trait Tagged<'brand, T: Tag<'brand>> {
+/// Note there's deliberately no bound on `T` here, and no `'brand` parameter. A tag type
+/// already carries its own brand, so a `Tagged` impl never has to name one:
+///
+/// ```ignore
+/// impl<'brand> Tagged<PlainTag<'brand, Tags>> for BlogPost<'brand> { .. }
+/// ```
+///
+/// Code that needs `T` to actually be a [`Tag`] says so itself. That keeps the lifetime
+/// out of every impl and every bound that mentions this trait, which matters because
+/// [`Index`] and [`Scan`] are generic over a manager whose brand they can't name.
+///
+/// [`Index`]: crate::query::Index
+/// [`Scan`]: crate::query::Scan
+pub trait Tagged<T> {
     /// The type of iterator used to provide the [`Tag`]s.
     ///
     /// The lifetime bounds indicate that the tagged type and the

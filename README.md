@@ -49,7 +49,7 @@ use std::slice::Iter;
 
 struct Post<'b> { title: &'static str, tags: Vec<PlainTag<'b>> }
 
-impl<'b> Tagged<'b, PlainTag<'b>> for Post<'b> {
+impl<'b> Tagged<PlainTag<'b>> for Post<'b> {
     type TagIter<'i> = Iter<'i, PlainTag<'b>> where Self: 'i;
     fn has_tags(&self) -> bool { !self.tags.is_empty() }
     fn get_tags(&self) -> Self::TagIter<'_> { self.tags.iter() }

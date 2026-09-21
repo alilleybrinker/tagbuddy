@@ -32,7 +32,7 @@ struct Item<'brand> {
     tags: Vec<PlainTag<'brand>>,
 }
 
-impl<'brand> Tagged<'brand, PlainTag<'brand>> for Item<'brand> {
+impl<'brand> Tagged<PlainTag<'brand>> for Item<'brand> {
     type TagIter<'iter>
         = Iter<'iter, PlainTag<'brand>>
     where
@@ -170,7 +170,7 @@ fn key_value_queries_use_keys_and_values() {
         tags: Vec<crate::tag::KeyValueTag<'brand>>,
     }
 
-    impl<'brand> Tagged<'brand, crate::tag::KeyValueTag<'brand>> for KvItem<'brand> {
+    impl<'brand> Tagged<crate::tag::KeyValueTag<'brand>> for KvItem<'brand> {
         type TagIter<'iter>
             = Iter<'iter, crate::tag::KeyValueTag<'brand>>
         where
@@ -258,7 +258,7 @@ fn multipart_queries_match_paths_and_prefixes() {
         tags: Vec<crate::tag::MultipartTag<'brand>>,
     }
 
-    impl<'brand> Tagged<'brand, crate::tag::MultipartTag<'brand>> for PathItem<'brand> {
+    impl<'brand> Tagged<crate::tag::MultipartTag<'brand>> for PathItem<'brand> {
         type TagIter<'iter>
             = Iter<'iter, crate::tag::MultipartTag<'brand>>
         where
@@ -553,7 +553,7 @@ fn exact_only_matches_plain_tags() {
         tags: Vec<MixedTag<'brand>>,
     }
 
-    impl<'brand> Tagged<'brand, MixedTag<'brand>> for Mixed<'brand> {
+    impl<'brand> Tagged<MixedTag<'brand>> for Mixed<'brand> {
         type TagIter<'iter>
             = Iter<'iter, MixedTag<'brand>>
         where
