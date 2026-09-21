@@ -55,17 +55,18 @@ use typed_builder::TypedBuilder;
 /// be frequently repeated across tags, resulting in space savings from interning.
 #[derive(TypedBuilder)]
 pub struct TagManager<
+    'brand,
     L = DefaultLabel,
     S = DefaultSymbol,
-    T = PlainTag<L, S>,
+    T = PlainTag<'brand, L, S>,
     P = Plain<L, S>,
     B = DefaultBackend<S>,
     H = DefaultHashBuilder,
 > where
     L: Label,
     S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
+    T: Tag<'brand, Label = L, Symbol = S>,
+    P: Parser<'brand, Tag = T> + Send + Sync,
     B: InternerBackend<Symbol = S>,
     H: BuildHasher,
 {
@@ -81,50 +82,18 @@ pub struct TagManager<
     pub(crate) path_separator: PathSep,
 
     /// Interns and stores string data for tags, to reduce memory usage.
-    pub(crate) storage: Storage<L, B, H>,
-}
-
-// These `Send` and `Sync` impls are safe _because_:
-//
-// 1. `key_value_separator` and `path_separator` are just read-only string slices, so they are
-//    trivially `Send` and `Sync`.
-// 2. `parser` is constrained to be `Send` and `Sync`, either trivially-so, or by being wrapped
-//    in an `Arc<Mutex<_>>` (in which case it takes advantage of an auto-impl for `Parser`
-//    that tries to lock the parser before parsing can proceed).
-// 3. `storage` is _always_ wrapped in an `Arc<Mutex<_>>`, so it is always `Send` and `Sync`.
-//
-// Given the above, `TagManager` is _always_ safe to send and sync, and can implement these traits.
-
-unsafe impl<L, S, T, P, B, H> Send for TagManager<L, S, T, P, B, H>
-where
-    L: Label,
-    S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
-    B: InternerBackend<Symbol = S>,
-    H: BuildHasher,
-{
-}
-
-unsafe impl<L, S, T, P, B, H> Sync for TagManager<L, S, T, P, B, H>
-where
-    L: Label,
-    S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
-    B: InternerBackend<Symbol = S>,
-    H: BuildHasher,
-{
+    pub(crate) storage: Storage<'brand, L, B, H>,
 }
 
 impl<
+        'brand,
         L: Label,
         S: Symbol,
-        T: Tag<Label = L, Symbol = S>,
-        P: Parser<Tag = T> + Send + Sync,
+        T: Tag<'brand, Label = L, Symbol = S>,
+        P: Parser<'brand, Tag = T> + Send + Sync,
         B: InternerBackend<Symbol = S>,
         H: BuildHasher,
-    > TagManager<L, S, T, P, B, H>
+    > TagManager<'brand, L, S, T, P, B, H>
 {
     /// Attempt to parse a structured tag from the provided "raw" tag.
     ///
@@ -257,7 +226,7 @@ impl<
     }
 
     /// Get the inner [`Storage`] of the [`TagManager`].
-    pub fn storage(&self) -> &Storage<L, B, H> {
+    pub fn storage(&self) -> &Storage<'brand, L, B, H> {
         &self.storage
     }
 

@@ -1,10 +1,12 @@
 //! Tests for the crate's APIs.
 
+use crate::brand::make_guard;
+use crate::brand::Guard;
 use crate::error::ParseError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::parse::*;
-use crate::storage::Storage;
+use crate::storage::DefaultStorage;
 use crate::tag::KeyValueSep;
 use crate::tag::KeyValueTag;
 use crate::tag::MultipartTag;
@@ -20,12 +22,15 @@ use string_interner::Symbol;
 // Helper function to test that a tag that's parsed and then resolved
 // back into a string results in the same string that was originally
 // put into the manager.
-fn test_roundtrip<L, S, T, P>(manager: &TagManager<L, S, T, P>, input: &str) -> Result<()>
+fn test_roundtrip<'brand, L, S, T, P>(
+    manager: &TagManager<'brand, L, S, T, P>,
+    input: &str,
+) -> Result<()>
 where
     L: Label,
     S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
+    T: Tag<'brand, Label = L, Symbol = S>,
+    P: Parser<'brand, Tag = T> + Send + Sync,
 {
     let tag = manager.parse_tag(input)?;
     let output = manager.resolve_tag(&tag)?;
@@ -35,9 +40,10 @@ where
 
 #[test]
 fn roundtrip_plain_tag() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(Plain::new())
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     test_roundtrip(&manager, "hello")
@@ -51,9 +57,10 @@ fn transform_tag() -> Result<()> {
         ChangeCase(Case::Snake, KeyValue::new(KvPolicy::NoAmbiguousSep)),
     );
 
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(parser)
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .key_value_separator(KeyValueSep("/"))
         .build();
 
@@ -69,9 +76,10 @@ fn transform_tag() -> Result<()> {
 
 #[test]
 fn roundtrip_key_value_tag_unambiguous() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(KeyValue::new(KvPolicy::NoAmbiguousSep))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     test_roundtrip(&manager, "hello:world")
@@ -79,9 +87,10 @@ fn roundtrip_key_value_tag_unambiguous() -> Result<()> {
 
 #[test]
 fn key_part_key_value_tag_unambiguous() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(KeyValue::new(KvPolicy::NoAmbiguousSep))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     let input = "hello:world";
@@ -96,9 +105,10 @@ fn key_part_key_value_tag_unambiguous() -> Result<()> {
 
 #[test]
 fn roundtrip_key_value_tag_split_first() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(KeyValue::new(KvPolicy::SplitOnFirstSep))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     test_roundtrip(&manager, "hello:world")
@@ -106,9 +116,10 @@ fn roundtrip_key_value_tag_split_first() -> Result<()> {
 
 #[test]
 fn key_part_key_value_tag_split_first() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(KeyValue::new(KvPolicy::SplitOnFirstSep))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     let input = "hello:world:today";
@@ -122,9 +133,10 @@ fn key_part_key_value_tag_split_first() -> Result<()> {
 
 #[test]
 fn roundtrip_key_value_tag_split_last() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(KeyValue::new(KvPolicy::SplitOnLastSep))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     test_roundtrip(&manager, "hello:world")
@@ -132,9 +144,10 @@ fn roundtrip_key_value_tag_split_last() -> Result<()> {
 
 #[test]
 fn key_part_key_value_tag_split_last() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(KeyValue::new(KvPolicy::SplitOnLastSep))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     let input = "hello:world:today";
@@ -148,9 +161,10 @@ fn key_part_key_value_tag_split_last() -> Result<()> {
 
 #[test]
 fn roundtrip_multipart_tag() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(Multipart::new(MultipartPolicy::RequireMultipart))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .path_separator(PathSep(":"))
         .build();
 
@@ -160,6 +174,7 @@ fn roundtrip_multipart_tag() -> Result<()> {
 #[test]
 #[cfg(all(feature = "convert_case", feature = "either"))]
 fn complex_parser() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(Trim(
             TrimBounds::Both,
@@ -171,7 +186,7 @@ fn complex_parser() -> Result<()> {
                 ),
             ),
         ))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     let tags: Vec<_> =
@@ -192,12 +207,13 @@ fn complex_parser() -> Result<()> {
 }
 
 // Helper to build a key-value manager with the default separator and the given policy.
-fn key_value_manager(
+fn key_value_manager<'brand>(
+    guard: Guard<'brand>,
     policy: KvPolicy,
-) -> TagManager<DefaultLabel, DefaultSymbol, KeyValueTag, KeyValue> {
+) -> TagManager<'brand, DefaultLabel, DefaultSymbol, KeyValueTag<'brand>, KeyValue> {
     TagManager::builder()
         .parser(KeyValue::new(policy))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build()
 }
 
@@ -208,7 +224,8 @@ fn key_value_tag_rejects_empty_key() {
         KvPolicy::SplitOnFirstSep,
         KvPolicy::SplitOnLastSep,
     ] {
-        let manager = key_value_manager(policy);
+        make_guard!(guard);
+        let manager = key_value_manager(guard, policy);
         assert!(
             matches!(manager.parse_tag(":world"), Err(ParseError::MissingKey)),
             "{policy:?} should reject an empty key"
@@ -223,7 +240,8 @@ fn key_value_tag_rejects_empty_value() {
         KvPolicy::SplitOnFirstSep,
         KvPolicy::SplitOnLastSep,
     ] {
-        let manager = key_value_manager(policy);
+        make_guard!(guard);
+        let manager = key_value_manager(guard, policy);
         assert!(
             matches!(manager.parse_tag("hello:"), Err(ParseError::MissingValue)),
             "{policy:?} should reject an empty value"
@@ -238,7 +256,8 @@ fn key_value_tag_rejects_separator_only() {
         KvPolicy::SplitOnFirstSep,
         KvPolicy::SplitOnLastSep,
     ] {
-        let manager = key_value_manager(policy);
+        make_guard!(guard);
+        let manager = key_value_manager(guard, policy);
         assert!(
             matches!(manager.parse_tag(":"), Err(ParseError::MissingKey)),
             "{policy:?} should reject a bare separator"
@@ -253,7 +272,8 @@ fn key_value_tag_missing_separator_is_missing_value() {
         KvPolicy::SplitOnFirstSep,
         KvPolicy::SplitOnLastSep,
     ] {
-        let manager = key_value_manager(policy);
+        make_guard!(guard);
+        let manager = key_value_manager(guard, policy);
         assert!(
             matches!(manager.parse_tag("hello"), Err(ParseError::MissingValue)),
             "{policy:?} should report a missing value when there's no separator"
@@ -263,7 +283,8 @@ fn key_value_tag_missing_separator_is_missing_value() {
 
 #[test]
 fn key_value_tag_still_rejects_ambiguous_separators() {
-    let manager = key_value_manager(KvPolicy::NoAmbiguousSep);
+    make_guard!(guard);
+    let manager = key_value_manager(guard, KvPolicy::NoAmbiguousSep);
     assert!(matches!(
         manager.parse_tag("hello:world:today"),
         Err(ParseError::AmbiguousKeyValueTag)
@@ -272,9 +293,10 @@ fn key_value_tag_still_rejects_ambiguous_separators() {
 
 #[test]
 fn batch_parse_and_resolve_roundtrip() -> Result<()> {
+    make_guard!(guard);
     let manager = TagManager::builder()
         .parser(Plain::new())
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build();
 
     let inputs = ["hello", "world", "today"];
@@ -290,7 +312,8 @@ fn batch_parse_and_resolve_roundtrip() -> Result<()> {
 
 #[test]
 fn batch_parse_reports_per_tag_errors() {
-    let manager = key_value_manager(KvPolicy::NoAmbiguousSep);
+    make_guard!(guard);
+    let manager = key_value_manager(guard, KvPolicy::NoAmbiguousSep);
 
     let results: Vec<_> = manager.parse_tags_into::<Vec<_>>(["good:tag", "bad", "also:good"]);
 
@@ -300,12 +323,13 @@ fn batch_parse_reports_per_tag_errors() {
 }
 
 // Helper to build a multipart manager with the default separator and the given policy.
-fn multipart_manager(
+fn multipart_manager<'brand>(
+    guard: Guard<'brand>,
     policy: MultipartPolicy,
-) -> TagManager<DefaultLabel, DefaultSymbol, MultipartTag, Multipart> {
+) -> TagManager<'brand, DefaultLabel, DefaultSymbol, MultipartTag<'brand>, Multipart> {
     TagManager::builder()
         .parser(Multipart::new(policy))
-        .storage(Storage::default())
+        .storage(DefaultStorage::fresh(guard))
         .build()
 }
 
@@ -318,7 +342,8 @@ fn multipart_tag_rejects_empty_parts() {
         MultipartPolicy::PermitOnePart,
         MultipartPolicy::RequireMultipart,
     ] {
-        let manager = multipart_manager(policy);
+        make_guard!(guard);
+        let manager = multipart_manager(guard, policy);
 
         for input in inputs {
             assert!(
@@ -331,7 +356,8 @@ fn multipart_tag_rejects_empty_parts() {
 
 #[test]
 fn multipart_tag_accepts_non_empty_parts() -> Result<()> {
-    let manager = multipart_manager(MultipartPolicy::RequireMultipart);
+    make_guard!(guard);
+    let manager = multipart_manager(guard, MultipartPolicy::RequireMultipart);
 
     test_roundtrip(&manager, "a/b")?;
     test_roundtrip(&manager, "lotr/legolas/friends")?;
@@ -342,10 +368,15 @@ fn multipart_tag_accepts_non_empty_parts() -> Result<()> {
 #[test]
 fn multipart_tag_single_part_still_depends_on_policy() -> Result<()> {
     // A single part is not an *empty* part, so the policy still decides.
-    test_roundtrip(&multipart_manager(MultipartPolicy::PermitOnePart), "solo")?;
+    make_guard!(permissive);
+    test_roundtrip(
+        &multipart_manager(permissive, MultipartPolicy::PermitOnePart),
+        "solo",
+    )?;
 
+    make_guard!(strict);
     assert!(matches!(
-        multipart_manager(MultipartPolicy::RequireMultipart).parse_tag("solo"),
+        multipart_manager(strict, MultipartPolicy::RequireMultipart).parse_tag("solo"),
         Err(ParseError::SinglePartMultipart)
     ));
 

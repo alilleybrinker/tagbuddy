@@ -5,16 +5,16 @@ use std::{collections::BTreeMap, hash::BuildHasher, marker::PhantomData};
 use string_interner::backend::Backend as InternerBackend;
 use string_interner::Symbol;
 
-struct QueryBuilder<'m, L, S, T, P, B, H>
+struct QueryBuilder<'m, 'brand, L, S, T, P, B, H>
 where
     L: Label,
     S: Symbol,
-    T: Tag<Label = L, Symbol = S>,
-    P: Parser<Tag = T> + Send + Sync,
+    T: Tag<'brand, Label = L, Symbol = S>,
+    P: Parser<'brand, Tag = T> + Send + Sync,
     B: InternerBackend<Symbol = S>,
     H: BuildHasher,
 {
-    manager: &'m TagManager<L, S, T, P, B, H>,
+    manager: &'m TagManager<'brand, L, S, T, P, B, H>,
     indices: QueryIndices<S>,
 }
 

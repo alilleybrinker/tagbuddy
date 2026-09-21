@@ -6,6 +6,7 @@ pub mod blog {
     use std::result::Result as StdResult;
     use std::slice::Iter as SliceIter;
     use string_interner::DefaultSymbol;
+    use tagbuddy::brand::Guard;
     use tagbuddy::generate_label;
     use tagbuddy::parse::*;
     use tagbuddy::storage::Storage;
@@ -19,30 +20,30 @@ pub mod blog {
         pub Ratings {}
     }
 
-    type PostTagsManager = TagManager<Tags, DefaultSymbol, PlainTag<Tags>, Plain<Tags>>;
-    type PostRatingsManager =
-        TagManager<Ratings, DefaultSymbol, KeyValueTag<Ratings>, KeyValue<Ratings>>;
+    type PostTagsManager<'brand> =
+        TagManager<'brand, Tags, DefaultSymbol, PlainTag<'brand, Tags>, Plain<Tags>>;
+    type PostRatingsManager<'brand> =
+        TagManager<'brand, Ratings, DefaultSymbol, KeyValueTag<'brand, Ratings>, KeyValue<Ratings>>;
 
-    pub struct Blog {
-        posts: Vec<BlogPost>,
-        tag_manager: PostTagsManager,
-        rating_manager: PostRatingsManager,
+    pub struct Blog<'brand> {
+        posts: Vec<BlogPost<'brand>>,
+        tag_manager: PostTagsManager<'brand>,
+        rating_manager: PostRatingsManager<'brand>,
     }
 
-    impl Default for Blog {
-        fn default() -> Self {
-            Blog::new()
-        }
-    }
-
-    impl Blog {
+    impl<'brand> Blog<'brand> {
         /// Initialize a new blog.
-        pub fn new() -> Self {
+        ///
+        /// The `guard` brands the blog's storage, which is what ties every tag the blog
+        /// produces to the interner that holds it.
+        pub fn new(guard: Guard<'brand>) -> Self {
             let tag_manager = TagManager::builder()
                 .parser(Plain::new())
-                .storage(Storage::<Tags>::fresh())
+                .storage(Storage::<Tags>::fresh(guard))
                 .build();
 
+            // The rating manager shares the tag manager's interner, so it shares its
+            // brand too -- only the label differs, keeping the two vocabularies apart.
             let rating_manager = TagManager::builder()
                 .parser(KeyValue::new(KvPolicy::NoAmbiguousSep))
                 .storage(tag_manager.storage().shallow_clone::<Ratings>())
@@ -83,13 +84,13 @@ pub mod blog {
         }
 
         /// Get the posts in the blog.
-        pub fn posts(&self) -> impl Iterator<Item = &BlogPost> {
+        pub fn posts(&self) -> impl Iterator<Item = &BlogPost<'brand>> {
             self.posts.iter()
         }
     }
 
     /// A single post on the blog.
-    pub struct BlogPost {
+    pub struct BlogPost<'brand> {
         /// The title of the post.
         #[allow(unused)]
         title: String,
@@ -99,24 +100,24 @@ pub mod blog {
         content: String,
 
         /// The tags associated with the post.
-        tags: Vec<PlainTag<Tags>>,
+        tags: Vec<PlainTag<'brand, Tags>>,
 
         /// The rating assigned to the post.
-        rating: KeyValueTag<Ratings>,
+        rating: KeyValueTag<'brand, Ratings>,
     }
 
-    impl BlogPost {
+    impl<'brand> BlogPost<'brand> {
         /// Get the tags applied to a blog post.
-        pub fn tags(&self, blog: &Blog) -> Vec<String> {
-            // SAFETY: We know we're using the correct storage, so the tag data should always be valid.
+        pub fn tags(&self, blog: &Blog<'brand>) -> Vec<String> {
+            // The brand guarantees this is the storage that interned these tags, so the
+            // only way resolution fails now is a poisoned lock.
             blog.tag_manager
                 .resolve_tags_into::<StdResult<_, _>>(Tagged::<PlainTag<Tags>>::get_tags(self))
                 .expect("tags should always resolve successfully")
         }
 
         /// Get the rating of a blog post.
-        pub fn rating(&self, blog: &Blog) -> String {
-            // SAFETY: We know we're using the correct storage, so the rating data should always be valid.
+        pub fn rating(&self, blog: &Blog<'brand>) -> String {
             blog.rating_manager
                 .resolve_tags_into::<StdResult<_, _>>(Tagged::<KeyValueTag<Ratings>>::get_tags(
                     self,
@@ -126,8 +127,11 @@ pub mod blog {
     }
 
     // Mark a blog post as being tagged with tags.
-    impl Tagged<PlainTag<Tags>> for BlogPost {
-        type TagIter<'iter> = SliceIter<'iter, PlainTag<Tags>>;
+    impl<'brand> Tagged<'brand, PlainTag<'brand, Tags>> for BlogPost<'brand> {
+        type TagIter<'iter>
+            = SliceIter<'iter, PlainTag<'brand, Tags>>
+        where
+            Self: 'iter;
 
         fn has_tags(&self) -> bool {
             self.tags.is_empty().not()
@@ -139,8 +143,11 @@ pub mod blog {
     }
 
     // Mark a blog post as being tagged with a rating.
-    impl Tagged<KeyValueTag<Ratings>> for BlogPost {
-        type TagIter<'iter> = OnceIter<&'iter KeyValueTag<Ratings>>;
+    impl<'brand> Tagged<'brand, KeyValueTag<'brand, Ratings>> for BlogPost<'brand> {
+        type TagIter<'iter>
+            = OnceIter<&'iter KeyValueTag<'brand, Ratings>>
+        where
+            Self: 'iter;
 
         fn has_tags(&self) -> bool {
             true
@@ -154,10 +161,12 @@ pub mod blog {
 
 use crate::blog::Blog;
 use anyhow::Result;
+use tagbuddy::brand::make_guard;
 
 #[test]
 fn blog_can_handle_tags_and_rating() -> Result<()> {
-    let mut blog = Blog::new();
+    make_guard!(guard);
+    let mut blog = Blog::new(guard);
 
     blog.add_post("one", "1", &["hello", "my", "friend"], "score:1")?
         .add_post("two", "2", &["goodbye", "your", "enemy"], "score:2")?

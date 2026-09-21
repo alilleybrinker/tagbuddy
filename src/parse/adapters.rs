@@ -47,20 +47,22 @@ macro_rules! adapters {
     ) => {
         $( #[$($attrss)*] )*
         #[derive(Debug, Clone)]
-        pub struct $struct<$($($type_var: $type_bound),*,)* P: Parser>($($(pub $field_ty),*,)* pub P);
+        // No `Parser` bound on the struct itself: `Parser` is branded now, and an
+        // adapter is brand-agnostic -- it's the impls below that tie it to a brand.
+        pub struct $struct<$($($type_var: $type_bound),*,)* P>($($(pub $field_ty),*,)* pub P);
 
-        impl<$($($type_var: $type_bound),*,)* P: Parser> $struct<$($($type_var),*,)* P> {
+        impl<'brand, $($($type_var: $type_bound),*,)* P: Parser<'brand>> $struct<$($($type_var),*,)* P> {
             /// Parse a token with the given `interner` and `separator`.
             #[allow(clippy::redundant_closure_call)]
             fn parse<B, H>(
                 &self,
-                storage: &mut StorageLock<'_, <P::Tag as Tag>::Label, B, H>,
+                storage: &mut StorageLock<'_, 'brand, <P::Tag as Tag<'brand>>::Label, B, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str,
             ) -> Result<P::Tag, ParseError>
             where
-                B: InternerBackend<Symbol = <P::Tag as Tag>::Symbol>,
+                B: InternerBackend<Symbol = <P::Tag as Tag<'brand>>::Symbol>,
                 H: BuildHasher
             {
                 ($adapter)(self, storage, key_value_separator, path_separator, raw)
@@ -68,18 +70,18 @@ macro_rules! adapters {
 
         }
 
-        impl<$($($type_var: $type_bound),*,)* P: Parser> Parser for $struct<$($($type_var),*,)* P> {
+        impl<'brand, $($($type_var: $type_bound),*,)* P: Parser<'brand>> Parser<'brand> for $struct<$($($type_var),*,)* P> {
             type Tag = P::Tag;
 
             fn parse<B, H>(
                 &self,
-                storage: &mut StorageLock<'_, <Self::Tag as Tag>::Label, B, H>,
+                storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str,
             ) -> Result<Self::Tag, ParseError>
             where
-                B: InternerBackend<Symbol = <Self::Tag as Tag>::Symbol>,
+                B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
                 H: BuildHasher
             {
                 self.parse(storage, key_value_separator, path_separator, raw)
@@ -189,37 +191,30 @@ impl<T: Replacer + Clone> CloneableReplacer for T {}
 /// Apply one parser, and if it fails, apply the other one.
 ///
 /// Note that the tokens produced by the two parsers have to support the same underlying
-/// symbol type, as they're both being backed by the same interner for storage.
+/// symbol type, as they're both being backed by the same interner for storage. That
+/// constraint now lives on the [`Parser`] impl rather than on [`Or`] itself, so the two
+/// tag types are inferred from the parsers instead of being spelled out.
 #[cfg(feature = "either")]
 #[derive(Debug)]
-pub struct Or<L, S, T1, T2, P1, P2>(pub P1, pub P2)
-where
-    L: Label,
-    S: Symbol,
-    T1: Tag<Label = L, Symbol = S>,
-    T2: Tag<Label = L, Symbol = S>,
-    P1: Parser<Tag = T1>,
-    P2: Parser<Tag = T2>;
+pub struct Or<P1, P2>(pub P1, pub P2);
 
 #[cfg(feature = "either")]
-impl<L, S, T1, T2, P1, P2> Or<L, S, T1, T2, P1, P2>
-where
-    L: Label,
-    S: Symbol,
-    T1: Tag<Label = L, Symbol = S>,
-    T2: Tag<Label = L, Symbol = S>,
-    P1: Parser<Tag = T1>,
-    P2: Parser<Tag = T2>,
-{
+impl<P1, P2> Or<P1, P2> {
     /// Parse a token with the given `interner` and `separator`.
-    fn parse<B, H>(
+    fn parse<'brand, L, S, B, H>(
         &self,
-        storage: &mut StorageLock<'_, L, B, H>,
+        storage: &mut StorageLock<'_, 'brand, L, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,
-    ) -> Result<Either<T1, T2>, ParseError>
+    ) -> Result<Either<P1::Tag, P2::Tag>, ParseError>
     where
+        L: Label,
+        S: Symbol,
+        P1: Parser<'brand>,
+        P2: Parser<'brand>,
+        P1::Tag: Tag<'brand, Label = L, Symbol = S>,
+        P2::Tag: Tag<'brand, Label = L, Symbol = S>,
         B: InternerBackend<Symbol = S>,
         H: BuildHasher,
     {
@@ -236,20 +231,20 @@ where
 }
 
 #[cfg(feature = "either")]
-impl<L, S, T1, T2, P1, P2> Parser for Or<L, S, T1, T2, P1, P2>
+impl<'brand, L, S, P1, P2> Parser<'brand> for Or<P1, P2>
 where
     L: Label,
     S: Symbol,
-    T1: Tag<Label = L, Symbol = S>,
-    T2: Tag<Label = L, Symbol = S>,
-    P1: Parser<Tag = T1>,
-    P2: Parser<Tag = T2>,
+    P1: Parser<'brand>,
+    P2: Parser<'brand>,
+    P1::Tag: Tag<'brand, Label = L, Symbol = S>,
+    P2::Tag: Tag<'brand, Label = L, Symbol = S>,
 {
-    type Tag = Either<T1, T2>;
+    type Tag = Either<P1::Tag, P2::Tag>;
 
     fn parse<B, H>(
         &self,
-        storage: &mut StorageLock<'_, L, B, H>,
+        storage: &mut StorageLock<'_, 'brand, L, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,

@@ -3,6 +3,7 @@
 use crate::error::ResolveError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
+use crate::storage::Id;
 #[cfg(doc)]
 use crate::storage::Storage;
 use crate::storage::StorageLock;
@@ -18,7 +19,6 @@ use std::hash::BuildHasher;
 use std::marker::PhantomData;
 use string_interner::backend::Backend as InternerBackend;
 use string_interner::DefaultSymbol;
-#[cfg(doc)]
 use string_interner::StringInterner;
 use string_interner::Symbol;
 
@@ -33,7 +33,7 @@ use string_interner::Symbol;
 /// Internally, [`Tag`]s are just a set of [`Symbol`]s used to make
 /// storage and identity comparison cheap while enabling reconstruction
 /// of the original [`String`].
-pub trait Tag {
+pub trait Tag<'brand> {
     /// The label of the [`TagManager`] used to produce the [`Tag`].
     type Label: Label;
 
@@ -44,9 +44,12 @@ pub trait Tag {
     fn kind(&self) -> TagKind;
 
     /// Try to resolve a [`Tag`] back into a [`String`].
+    ///
+    /// The `'brand` on the [`StorageLock`] must match the one this [`Tag`] carries, so
+    /// this can only ever be called with the [`Storage`] that interned it.
     fn resolve<B, H>(
         &self,
-        storage: &StorageLock<'_, Self::Label, B, H>,
+        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
     ) -> Result<String, ResolveError>
@@ -57,19 +60,19 @@ pub trait Tag {
 
 #[cfg(feature = "either")]
 // Auto-impl for `Either` wrapping two `Tag`s.
-impl<L, S, T1, T2> Tag for Either<T1, T2>
+impl<'brand, L, S, T1, T2> Tag<'brand> for Either<T1, T2>
 where
     L: Label,
     S: Symbol,
-    T1: Tag<Label = L, Symbol = S>,
-    T2: Tag<Label = L, Symbol = S>,
+    T1: Tag<'brand, Label = L, Symbol = S>,
+    T2: Tag<'brand, Label = L, Symbol = S>,
 {
     type Label = L;
     type Symbol = S;
 
     fn resolve<B, H>(
         &self,
-        storage: &StorageLock<'_, Self::Label, B, H>,
+        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
     ) -> Result<String, ResolveError>
@@ -97,23 +100,27 @@ where
 ///
 /// [`PlainTag`] interns the full contents of a tag together.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct PlainTag<L = DefaultLabel, S = DefaultSymbol>(S, PhantomData<L>)
+pub struct PlainTag<'brand, L = DefaultLabel, S = DefaultSymbol>(S, PhantomData<L>, Id<'brand>)
 where
     L: Label,
     S: Symbol;
 
-impl<L: Label, S: Symbol> PlainTag<L, S> {
+impl<'brand, L: Label, S: Symbol> PlainTag<'brand, L, S> {
     /// Construct a new [`PlainTag`].
-    pub(crate) fn new<B, H>(storage: &mut StorageLock<'_, L, B, H>, raw: &str) -> Self
+    pub(crate) fn new<B, H>(storage: &mut StorageLock<'_, 'brand, L, B, H>, raw: &str) -> Self
     where
         B: InternerBackend<Symbol = S>,
         H: BuildHasher,
     {
-        PlainTag(storage.get_or_intern(raw), PhantomData)
+        let brand = storage.brand();
+        PlainTag(storage.get_or_intern(raw), PhantomData, brand)
     }
 
     /// Resolve the whole tag into a [`String`].
-    pub fn resolve<B, H>(&self, storage: &StorageLock<'_, L, B, H>) -> Result<String, ResolveError>
+    pub fn resolve<B, H>(
+        &self,
+        storage: &StorageLock<'_, 'brand, L, B, H>,
+    ) -> Result<String, ResolveError>
     where
         B: InternerBackend<Symbol = S>,
         H: BuildHasher,
@@ -129,7 +136,7 @@ impl<L: Label, S: Symbol> PlainTag<L, S> {
     /// string.
     pub fn resolve_str<'intern, B, H>(
         &self,
-        storage: &'intern StorageLock<'_, L, B, H>,
+        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
     ) -> Result<&'intern str, ResolveError>
     where
         B: InternerBackend<Symbol = S>,
@@ -139,13 +146,13 @@ impl<L: Label, S: Symbol> PlainTag<L, S> {
     }
 }
 
-impl<L: Label, S: Symbol> Tag for PlainTag<L, S> {
+impl<'brand, L: Label, S: Symbol> Tag<'brand> for PlainTag<'brand, L, S> {
     type Label = L;
     type Symbol = S;
 
     fn resolve<B, H>(
         &self,
-        storage: &StorageLock<'_, Self::Label, B, H>,
+        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
         _key_value_separator: KeyValueSep,
         _path_separator: PathSep,
     ) -> Result<String, ResolveError>
@@ -168,29 +175,40 @@ impl<L: Label, S: Symbol> Tag for PlainTag<L, S> {
 /// [`KeyValueTag`] interns the key and value separately, on the expectation
 /// that keys especially will be frequently repeated across tags.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct KeyValueTag<L = DefaultLabel, S = DefaultSymbol>(S, S, PhantomData<L>)
+pub struct KeyValueTag<'brand, L = DefaultLabel, S = DefaultSymbol>(
+    S,
+    S,
+    PhantomData<L>,
+    Id<'brand>,
+)
 where
     L: Label,
     S: Symbol;
 
-impl<L: Label, S: Symbol> KeyValueTag<L, S> {
+impl<'brand, L: Label, S: Symbol> KeyValueTag<'brand, L, S> {
     /// Construct a new [`KeyValueTag`].
-    pub(crate) fn new<B, H>(storage: &mut StorageLock<'_, L, B, H>, key: &str, value: &str) -> Self
+    pub(crate) fn new<B, H>(
+        storage: &mut StorageLock<'_, 'brand, L, B, H>,
+        key: &str,
+        value: &str,
+    ) -> Self
     where
         B: InternerBackend<Symbol = S>,
         H: BuildHasher,
     {
+        let brand = storage.brand();
         KeyValueTag(
             storage.get_or_intern(key),
             storage.get_or_intern(value),
             PhantomData,
+            brand,
         )
     }
 
     /// Resolve the whole tag into a [`String`].
     pub fn resolve<B, H>(
         &self,
-        storage: &StorageLock<'_, L, B, H>,
+        storage: &StorageLock<'_, 'brand, L, B, H>,
         key_value_separator: KeyValueSep,
         _path_separator: PathSep,
     ) -> Result<String, ResolveError>
@@ -210,7 +228,7 @@ impl<L: Label, S: Symbol> KeyValueTag<L, S> {
     /// strings.
     pub fn resolve_key_value<'intern, B, H>(
         &self,
-        storage: &'intern StorageLock<'_, L, B, H>,
+        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
     ) -> Result<(&'intern str, &'intern str), ResolveError>
     where
         B: InternerBackend<Symbol = S>,
@@ -231,7 +249,7 @@ impl<L: Label, S: Symbol> KeyValueTag<L, S> {
     /// strings.
     pub fn try_resolve_key_value<'intern, B, H>(
         &self,
-        storage: &'intern StorageLock<'_, L, B, H>,
+        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
     ) -> (
         Result<&'intern str, ResolveError>,
         Result<&'intern str, ResolveError>,
@@ -247,13 +265,13 @@ impl<L: Label, S: Symbol> KeyValueTag<L, S> {
     }
 }
 
-impl<L: Label, S: Symbol> Tag for KeyValueTag<L, S> {
+impl<'brand, L: Label, S: Symbol> Tag<'brand> for KeyValueTag<'brand, L, S> {
     type Label = L;
     type Symbol = S;
 
     fn resolve<B, H>(
         &self,
-        storage: &StorageLock<'_, Self::Label, B, H>,
+        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
     ) -> Result<String, ResolveError>
@@ -276,29 +294,38 @@ impl<L: Label, S: Symbol> Tag for KeyValueTag<L, S> {
 /// [`MultipartTag`] interns each part of the tag separately, on the
 /// expectation that individual parts will be frequently repeated.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MultipartTag<L = DefaultLabel, S = DefaultSymbol>(Vec<S>, PhantomData<L>)
+pub struct MultipartTag<'brand, L = DefaultLabel, S = DefaultSymbol>(
+    Vec<S>,
+    PhantomData<L>,
+    Id<'brand>,
+)
 where
     L: Label,
     S: Symbol;
 
-impl<L: Label, S: Symbol> MultipartTag<L, S> {
+impl<'brand, L: Label, S: Symbol> MultipartTag<'brand, L, S> {
     /// Construct a new [`MultipartTag`].
-    pub(crate) fn new<'part, I, B, H>(storage: &mut StorageLock<'_, L, B, H>, parts: I) -> Self
+    pub(crate) fn new<'part, I, B, H>(
+        storage: &mut StorageLock<'_, 'brand, L, B, H>,
+        parts: I,
+    ) -> Self
     where
         I: Iterator<Item = &'part str>,
         B: InternerBackend<Symbol = S>,
         H: BuildHasher,
     {
+        let brand = storage.brand();
         MultipartTag(
             parts.map(|part| storage.get_or_intern(part)).collect(),
             PhantomData,
+            brand,
         )
     }
 
     /// Resolve the whole tag into a [`String`].
     pub fn resolve<B, H>(
         &self,
-        storage: &StorageLock<'_, L, B, H>,
+        storage: &StorageLock<'_, 'brand, L, B, H>,
         _key_value_separator: KeyValueSep,
         path_separator: PathSep,
     ) -> Result<String, ResolveError>
@@ -325,7 +352,7 @@ impl<L: Label, S: Symbol> MultipartTag<L, S> {
     /// strings.
     pub fn resolve_parts<'intern, B, H, C>(
         &self,
-        storage: &'intern StorageLock<'_, L, B, H>,
+        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
     ) -> Result<C, ResolveError>
     where
         B: InternerBackend<Symbol = S>,
@@ -346,26 +373,31 @@ impl<L: Label, S: Symbol> MultipartTag<L, S> {
     /// strings.
     pub fn try_resolve_parts<'s, 'intern: 's, B, H>(
         &'s self,
-        storage: &'intern StorageLock<'_, L, B, H>,
+        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
     ) -> impl Iterator<Item = Result<&'intern str, ResolveError>> + 's
     where
         B: InternerBackend<Symbol = S>,
         H: BuildHasher,
     {
+        // Deref down to the interner itself before building the iterator. Capturing
+        // the `StorageLock` would make the returned iterator capture its `'brand` and
+        // `'lock` too, which the `+ 's` bound doesn't name.
+        let interner: &'intern StringInterner<B, H> = storage;
+
         self.0
             .iter()
             .copied()
-            .map(|part| storage.resolve(part).ok_or(ResolveError::PartNotFound))
+            .map(move |part| interner.resolve(part).ok_or(ResolveError::PartNotFound))
     }
 }
 
-impl<L: Label, S: Symbol> Tag for MultipartTag<L, S> {
+impl<'brand, L: Label, S: Symbol> Tag<'brand> for MultipartTag<'brand, L, S> {
     type Label = L;
     type Symbol = S;
 
     fn resolve<B, H>(
         &self,
-        storage: &StorageLock<'_, Self::Label, B, H>,
+        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
     ) -> Result<String, ResolveError>
@@ -441,7 +473,7 @@ pub enum TagKind {
 ///
 /// This trait is generic over the tag type, to permit implementing
 /// it for multiple types of tags.
-pub trait Tagged<T: Tag> {
+pub trait Tagged<'brand, T: Tag<'brand>> {
     /// The type of iterator used to provide the [`Tag`]s.
     ///
     /// The lifetime bounds indicate that the tagged type and the

@@ -28,41 +28,41 @@ use string_interner::Symbol;
 /// any internal state, this is trivial, but more complex parsers may
 /// need to establish internal synchronization of their state in the case
 /// that they are performing concurrent parses.
-pub trait Parser {
+pub trait Parser<'brand> {
     /// The type of [`Tag`] produced by the [`Parser`].
-    type Tag: Tag;
+    type Tag: Tag<'brand>;
 
     /// Parse a given string to produce a new [`Tag`].
     fn parse<B, H>(
         &self,
-        storage: &mut StorageLock<'_, <Self::Tag as Tag>::Label, B, H>,
+        storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,
     ) -> Result<Self::Tag, ParseError>
     where
-        B: InternerBackend<Symbol = <Self::Tag as Tag>::Symbol>,
+        B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
         H: BuildHasher;
 }
 
 // Implement Parser for any Parser wrapped in `Arc<Mutex<_>>`, to enable
 // passing externally-synchronized parsers in addition to trivially-synchronized ones,
 // in cases where the parsers maintain internal state.
-impl<P> Parser for Arc<Mutex<P>>
+impl<'brand, P> Parser<'brand> for Arc<Mutex<P>>
 where
-    P: Parser,
+    P: Parser<'brand>,
 {
     type Tag = P::Tag;
 
     fn parse<B, H>(
         &self,
-        storage: &mut StorageLock<'_, <Self::Tag as Tag>::Label, B, H>,
+        storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,
     ) -> Result<Self::Tag, ParseError>
     where
-        B: InternerBackend<Symbol = <Self::Tag as Tag>::Symbol>,
+        B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
         H: BuildHasher,
     {
         let internal_parser = self.lock().map_err(|_| ParseError::CouldNotLock)?;
@@ -158,14 +158,16 @@ macro_rules! parsers {
             }
 
             /// Parse a token with the given `interner` and `separator`.
+            ///
+            /// The produced tag carries the `'brand` of the storage it was interned into.
             #[allow(clippy::redundant_closure_call)]
-            pub fn parse<B, H>(
+            pub fn parse<'brand, B, H>(
                 &self,
-                storage: &mut StorageLock<'_, L, B, H>,
+                storage: &mut StorageLock<'_, 'brand, L, B, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str
-            ) -> Result<$tag<L, S>, ParseError>
+            ) -> Result<$tag<'brand, L, S>, ParseError>
             where
                 S: Symbol,
                 B: InternerBackend<Symbol = S>,
@@ -176,18 +178,18 @@ macro_rules! parsers {
             }
         }
 
-        impl<L: Label, S: Symbol> Parser for $struct<L, S> {
-            type Tag = $tag<L, S>;
+        impl<'brand, L: Label, S: Symbol> Parser<'brand> for $struct<L, S> {
+            type Tag = $tag<'brand, L, S>;
 
             fn parse<B, H>(
                 &self,
-                storage: &mut StorageLock<'_, <Self::Tag as Tag>::Label, B, H>,
+                storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str
             ) -> Result<Self::Tag, ParseError>
             where
-                B: InternerBackend<Symbol = <Self::Tag as Tag>::Symbol>,
+                B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
                 H: BuildHasher
             {
                 self.parse(storage, key_value_separator, path_separator, raw)
