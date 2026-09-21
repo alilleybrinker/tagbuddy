@@ -31,11 +31,12 @@ version = "0.11.0"
 version = "1.8.4"
 optional = true
 
-[dependencies.string-interner]
-version = "0.14.0"
-default-features = false
-# Omit the `serde` dependency to improve compilation speed.
-features = ["std", "inline-more", "backends"]
+# A concurrent, append-only string interner. `ThreadedRodeo` interns and resolves
+# through `&self`, so tag storage needs no lock, and it exposes no `&mut` API at
+# all -- no `clear`, no `remove` -- which is what makes symbols valid forever.
+[dependencies.lasso]
+version = "0.7.3"
+features = ["multi-threaded", "inline-more"]
 
 [dependencies.typed-builder]
 version = "0.14.0"

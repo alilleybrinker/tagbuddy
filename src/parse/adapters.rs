@@ -4,7 +4,8 @@ use crate::error::ParseError;
 #[cfg(feature = "either")]
 use crate::label::Label;
 use crate::parse::Parser;
-use crate::storage::StorageLock;
+use crate::storage::Key;
+use crate::storage::Storage;
 use crate::tag::KeyValueSep;
 use crate::tag::PathSep;
 use crate::tag::Tag;
@@ -19,9 +20,7 @@ use regex::Regex;
 #[cfg(feature = "regex")]
 use regex::Replacer;
 use std::hash::BuildHasher;
-use string_interner::backend::Backend as InternerBackend;
-#[cfg(feature = "either")]
-use string_interner::Symbol;
+use std::hash::Hash;
 
 // Helper macro to generate parser adapters.
 macro_rules! adapters {
@@ -54,16 +53,15 @@ macro_rules! adapters {
         impl<'brand, $($($type_var: $type_bound),*,)* P: Parser<'brand>> $struct<$($($type_var),*,)* P> {
             /// Parse a token with the given `interner` and `separator`.
             #[allow(clippy::redundant_closure_call)]
-            fn parse<B, H>(
+            fn parse<H>(
                 &self,
-                storage: &mut StorageLock<'_, 'brand, <P::Tag as Tag<'brand>>::Label, B, H>,
+                storage: &Storage<'brand, <P::Tag as Tag<'brand>>::Label, <P::Tag as Tag<'brand>>::Key, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str,
             ) -> Result<P::Tag, ParseError>
             where
-                B: InternerBackend<Symbol = <P::Tag as Tag<'brand>>::Symbol>,
-                H: BuildHasher
+                H: BuildHasher + Clone
             {
                 ($adapter)(self, storage, key_value_separator, path_separator, raw)
             }
@@ -73,16 +71,15 @@ macro_rules! adapters {
         impl<'brand, $($($type_var: $type_bound),*,)* P: Parser<'brand>> Parser<'brand> for $struct<$($($type_var),*,)* P> {
             type Tag = P::Tag;
 
-            fn parse<B, H>(
+            fn parse<H>(
                 &self,
-                storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
+                storage: &Storage<'brand, <Self::Tag as Tag<'brand>>::Label, <Self::Tag as Tag<'brand>>::Key, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str,
             ) -> Result<Self::Tag, ParseError>
             where
-                B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
-                H: BuildHasher
+                H: BuildHasher + Clone
             {
                 self.parse(storage, key_value_separator, path_separator, raw)
             }
@@ -201,22 +198,21 @@ pub struct Or<P1, P2>(pub P1, pub P2);
 #[cfg(feature = "either")]
 impl<P1, P2> Or<P1, P2> {
     /// Parse a token with the given `interner` and `separator`.
-    fn parse<'brand, L, S, B, H>(
+    fn parse<'brand, L, K, H>(
         &self,
-        storage: &mut StorageLock<'_, 'brand, L, B, H>,
+        storage: &Storage<'brand, L, K, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,
     ) -> Result<Either<P1::Tag, P2::Tag>, ParseError>
     where
         L: Label,
-        S: Symbol,
+        K: Key + Hash,
         P1: Parser<'brand>,
         P2: Parser<'brand>,
-        P1::Tag: Tag<'brand, Label = L, Symbol = S>,
-        P2::Tag: Tag<'brand, Label = L, Symbol = S>,
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        P1::Tag: Tag<'brand, Label = L, Key = K>,
+        P2::Tag: Tag<'brand, Label = L, Key = K>,
+        H: BuildHasher + Clone,
     {
         self.0
             .parse(storage, key_value_separator, path_separator, raw)
@@ -231,27 +227,26 @@ impl<P1, P2> Or<P1, P2> {
 }
 
 #[cfg(feature = "either")]
-impl<'brand, L, S, P1, P2> Parser<'brand> for Or<P1, P2>
+impl<'brand, L, K, P1, P2> Parser<'brand> for Or<P1, P2>
 where
     L: Label,
-    S: Symbol,
+    K: Key + Hash,
     P1: Parser<'brand>,
     P2: Parser<'brand>,
-    P1::Tag: Tag<'brand, Label = L, Symbol = S>,
-    P2::Tag: Tag<'brand, Label = L, Symbol = S>,
+    P1::Tag: Tag<'brand, Label = L, Key = K>,
+    P2::Tag: Tag<'brand, Label = L, Key = K>,
 {
     type Tag = Either<P1::Tag, P2::Tag>;
 
-    fn parse<B, H>(
+    fn parse<H>(
         &self,
-        storage: &mut StorageLock<'_, 'brand, L, B, H>,
+        storage: &Storage<'brand, L, K, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,
     ) -> Result<Self::Tag, ParseError>
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
         self.parse(storage, key_value_separator, path_separator, raw)
     }

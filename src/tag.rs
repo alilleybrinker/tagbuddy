@@ -1,26 +1,23 @@
 //! Different kinds of [`Tag`]s that can be parsed.
 
-use crate::error::ResolveError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::storage::Id;
-#[cfg(doc)]
+use crate::storage::Interner;
+use crate::storage::Key;
+use crate::storage::Spur;
 use crate::storage::Storage;
-use crate::storage::StorageLock;
 #[cfg(doc)]
 use crate::TagManager;
 #[cfg(feature = "either")]
 use either::Either;
-use itertools::intersperse_with;
+use itertools::Itertools as _;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::fmt::Result as FmtResult;
 use std::hash::BuildHasher;
+use std::hash::Hash;
 use std::marker::PhantomData;
-use string_interner::backend::Backend as InternerBackend;
-use string_interner::DefaultSymbol;
-use string_interner::StringInterner;
-use string_interner::Symbol;
 
 /// A trait defining a [`Tag`] which contains interned data.
 ///
@@ -29,56 +26,55 @@ use string_interner::Symbol;
 /// created it and the correct separator configured by the [`TagManager`]
 /// that built it.
 ///
-/// [`Tag`]s have an underlying [`Symbol`] used to define their storage.
-/// Internally, [`Tag`]s are just a set of [`Symbol`]s used to make
+/// [`Tag`]s have an underlying [`Key`] used to define their storage.
+/// Internally, [`Tag`]s are just a set of [`Key`]s used to make
 /// storage and identity comparison cheap while enabling reconstruction
 /// of the original [`String`].
 pub trait Tag<'brand> {
     /// The label of the [`TagManager`] used to produce the [`Tag`].
     type Label: Label;
 
-    /// The [`Symbol`] used by the [`Storage`] as a handle to the stored string data.
-    type Symbol: Symbol;
+    /// The [`Key`] used by the [`Storage`] as a handle to the stored string data.
+    type Key: Key + Hash;
 
     /// Get the [`TagKind`] of the current tag.
     fn kind(&self) -> TagKind;
 
-    /// Try to resolve a [`Tag`] back into a [`String`].
+    /// Resolve a [`Tag`] back into a [`String`].
     ///
-    /// The `'brand` on the [`StorageLock`] must match the one this [`Tag`] carries, so
-    /// this can only ever be called with the [`Storage`] that interned it.
-    fn resolve<B, H>(
+    /// The `'brand` on the [`Storage`] must match the one this [`Tag`] carries, so this
+    /// can only ever be called with the [`Storage`] that interned it. That, plus the
+    /// [`Interner`] being append-only, is why this can't fail.
+    fn resolve<H>(
         &self,
-        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
+        storage: &Storage<'brand, Self::Label, Self::Key, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
-    ) -> Result<String, ResolveError>
+    ) -> String
     where
-        B: InternerBackend<Symbol = Self::Symbol>,
-        H: BuildHasher;
+        H: BuildHasher + Clone;
 }
 
 #[cfg(feature = "either")]
 // Auto-impl for `Either` wrapping two `Tag`s.
-impl<'brand, L, S, T1, T2> Tag<'brand> for Either<T1, T2>
+impl<'brand, L, K, T1, T2> Tag<'brand> for Either<T1, T2>
 where
     L: Label,
-    S: Symbol,
-    T1: Tag<'brand, Label = L, Symbol = S>,
-    T2: Tag<'brand, Label = L, Symbol = S>,
+    K: Key + Hash,
+    T1: Tag<'brand, Label = L, Key = K>,
+    T2: Tag<'brand, Label = L, Key = K>,
 {
     type Label = L;
-    type Symbol = S;
+    type Key = K;
 
-    fn resolve<B, H>(
+    fn resolve<H>(
         &self,
-        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
+        storage: &Storage<'brand, Self::Label, Self::Key, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
-    ) -> Result<String, ResolveError>
+    ) -> String
     where
-        B: InternerBackend<Symbol = Self::Symbol>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
         match self {
             Either::Left(t) => t.resolve(storage, key_value_separator, path_separator),
@@ -100,32 +96,26 @@ where
 ///
 /// [`PlainTag`] interns the full contents of a tag together.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct PlainTag<'brand, L = DefaultLabel, S = DefaultSymbol>(S, PhantomData<L>, Id<'brand>)
+pub struct PlainTag<'brand, L = DefaultLabel, K = Spur>(K, PhantomData<L>, Id<'brand>)
 where
     L: Label,
-    S: Symbol;
+    K: Key + Hash;
 
-impl<'brand, L: Label, S: Symbol> PlainTag<'brand, L, S> {
+impl<'brand, L: Label, K: Key + Hash> PlainTag<'brand, L, K> {
     /// Construct a new [`PlainTag`].
-    pub(crate) fn new<B, H>(storage: &mut StorageLock<'_, 'brand, L, B, H>, raw: &str) -> Self
+    pub(crate) fn new<H>(storage: &Storage<'brand, L, K, H>, raw: &str) -> Self
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        let brand = storage.brand();
-        PlainTag(storage.get_or_intern(raw), PhantomData, brand)
+        PlainTag(storage.get_or_intern(raw), PhantomData, storage.brand())
     }
 
     /// Resolve the whole tag into a [`String`].
-    pub fn resolve<B, H>(
-        &self,
-        storage: &StorageLock<'_, 'brand, L, B, H>,
-    ) -> Result<String, ResolveError>
+    pub fn resolve<H>(&self, storage: &Storage<'brand, L, K, H>) -> String
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        self.resolve_str(storage).map(ToString::to_string)
+        self.resolve_str(storage).to_owned()
     }
 
     /// Resolve the whole tag into a string slice.
@@ -134,31 +124,26 @@ impl<'brand, L: Label, S: Symbol> PlainTag<'brand, L, S> {
     /// data, which means you're holding a borrow on the interner as long as the slice
     /// is held. If you want to let go of the borrow, copy the slice into a new owned
     /// string.
-    pub fn resolve_str<'intern, B, H>(
-        &self,
-        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
-    ) -> Result<&'intern str, ResolveError>
+    pub fn resolve_str<'s, H>(&self, storage: &'s Storage<'brand, L, K, H>) -> &'s str
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        storage.resolve(self.0).ok_or(ResolveError::TagNotFound)
+        storage.resolve(self.0)
     }
 }
 
-impl<'brand, L: Label, S: Symbol> Tag<'brand> for PlainTag<'brand, L, S> {
+impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for PlainTag<'brand, L, K> {
     type Label = L;
-    type Symbol = S;
+    type Key = K;
 
-    fn resolve<B, H>(
+    fn resolve<H>(
         &self,
-        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
+        storage: &Storage<'brand, Self::Label, Self::Key, H>,
         _key_value_separator: KeyValueSep,
         _path_separator: PathSep,
-    ) -> Result<String, ResolveError>
+    ) -> String
     where
-        B: InternerBackend<Symbol = Self::Symbol>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
         self.resolve(storage)
     }
@@ -175,49 +160,37 @@ impl<'brand, L: Label, S: Symbol> Tag<'brand> for PlainTag<'brand, L, S> {
 /// [`KeyValueTag`] interns the key and value separately, on the expectation
 /// that keys especially will be frequently repeated across tags.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct KeyValueTag<'brand, L = DefaultLabel, S = DefaultSymbol>(
-    S,
-    S,
-    PhantomData<L>,
-    Id<'brand>,
-)
+pub struct KeyValueTag<'brand, L = DefaultLabel, K = Spur>(K, K, PhantomData<L>, Id<'brand>)
 where
     L: Label,
-    S: Symbol;
+    K: Key + Hash;
 
-impl<'brand, L: Label, S: Symbol> KeyValueTag<'brand, L, S> {
+impl<'brand, L: Label, K: Key + Hash> KeyValueTag<'brand, L, K> {
     /// Construct a new [`KeyValueTag`].
-    pub(crate) fn new<B, H>(
-        storage: &mut StorageLock<'_, 'brand, L, B, H>,
-        key: &str,
-        value: &str,
-    ) -> Self
+    pub(crate) fn new<H>(storage: &Storage<'brand, L, K, H>, key: &str, value: &str) -> Self
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        let brand = storage.brand();
         KeyValueTag(
             storage.get_or_intern(key),
             storage.get_or_intern(value),
             PhantomData,
-            brand,
+            storage.brand(),
         )
     }
 
     /// Resolve the whole tag into a [`String`].
-    pub fn resolve<B, H>(
+    pub fn resolve<H>(
         &self,
-        storage: &StorageLock<'_, 'brand, L, B, H>,
+        storage: &Storage<'brand, L, K, H>,
         key_value_separator: KeyValueSep,
         _path_separator: PathSep,
-    ) -> Result<String, ResolveError>
+    ) -> String
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        self.resolve_key_value(storage)
-            .map(|(key, value)| format!("{key}{key_value_separator}{value}"))
+        let (key, value) = self.resolve_key_value(storage);
+        format!("{key}{key_value_separator}{value}")
     }
 
     /// Resolve the key and value parts of the tag separately.
@@ -226,58 +199,29 @@ impl<'brand, L: Label, S: Symbol> KeyValueTag<'brand, L, S> {
     /// data, which means you're holding a borrow on the interner as long as the slices
     /// are held. If you want to let go of the borrow, copy the slices into new owned
     /// strings.
-    pub fn resolve_key_value<'intern, B, H>(
+    pub fn resolve_key_value<'s, H>(
         &self,
-        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
-    ) -> Result<(&'intern str, &'intern str), ResolveError>
+        storage: &'s Storage<'brand, L, K, H>,
+    ) -> (&'s str, &'s str)
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        let (key, value) = self.try_resolve_key_value(storage);
-        Ok((key?, value?))
-    }
-
-    /// Try to resolve the key and value parts of the tag separately.
-    ///
-    /// This lets you resolve partial tags, if for some reason part of the tag
-    /// resolves and the other doesn't.
-    ///
-    /// Note that the returned string slices are views into the underlying interner
-    /// data, which means you're holding a borrow on the interner as long as the slices
-    /// are held. If you want to let go of the borrow, copy the slices into new owned
-    /// strings.
-    pub fn try_resolve_key_value<'intern, B, H>(
-        &self,
-        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
-    ) -> (
-        Result<&'intern str, ResolveError>,
-        Result<&'intern str, ResolveError>,
-    )
-    where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
-    {
-        (
-            storage.resolve(self.0).ok_or(ResolveError::KeyNotFound),
-            storage.resolve(self.1).ok_or(ResolveError::ValueNotFound),
-        )
+        (storage.resolve(self.0), storage.resolve(self.1))
     }
 }
 
-impl<'brand, L: Label, S: Symbol> Tag<'brand> for KeyValueTag<'brand, L, S> {
+impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for KeyValueTag<'brand, L, K> {
     type Label = L;
-    type Symbol = S;
+    type Key = K;
 
-    fn resolve<B, H>(
+    fn resolve<H>(
         &self,
-        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
+        storage: &Storage<'brand, Self::Label, Self::Key, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
-    ) -> Result<String, ResolveError>
+    ) -> String
     where
-        B: InternerBackend<Symbol = Self::Symbol>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
         self.resolve(storage, key_value_separator, path_separator)
     }
@@ -294,116 +238,84 @@ impl<'brand, L: Label, S: Symbol> Tag<'brand> for KeyValueTag<'brand, L, S> {
 /// [`MultipartTag`] interns each part of the tag separately, on the
 /// expectation that individual parts will be frequently repeated.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MultipartTag<'brand, L = DefaultLabel, S = DefaultSymbol>(
-    Vec<S>,
-    PhantomData<L>,
-    Id<'brand>,
-)
+pub struct MultipartTag<'brand, L = DefaultLabel, K = Spur>(Vec<K>, PhantomData<L>, Id<'brand>)
 where
     L: Label,
-    S: Symbol;
+    K: Key + Hash;
 
-impl<'brand, L: Label, S: Symbol> MultipartTag<'brand, L, S> {
+impl<'brand, L: Label, K: Key + Hash> MultipartTag<'brand, L, K> {
     /// Construct a new [`MultipartTag`].
-    pub(crate) fn new<'part, I, B, H>(
-        storage: &mut StorageLock<'_, 'brand, L, B, H>,
-        parts: I,
-    ) -> Self
+    pub(crate) fn new<'part, I, H>(storage: &Storage<'brand, L, K, H>, parts: I) -> Self
     where
         I: Iterator<Item = &'part str>,
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        let brand = storage.brand();
         MultipartTag(
             parts.map(|part| storage.get_or_intern(part)).collect(),
             PhantomData,
-            brand,
+            storage.brand(),
         )
     }
 
     /// Resolve the whole tag into a [`String`].
-    pub fn resolve<B, H>(
+    pub fn resolve<H>(
         &self,
-        storage: &StorageLock<'_, 'brand, L, B, H>,
+        storage: &Storage<'brand, L, K, H>,
         _key_value_separator: KeyValueSep,
         path_separator: PathSep,
-    ) -> Result<String, ResolveError>
+    ) -> String
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        intersperse_with(self.try_resolve_parts(storage), || Ok(path_separator.0)).try_fold(
-            String::new(),
-            |mut acc, res| {
-                res.map(|next| {
-                    acc.push_str(next);
-                    acc
-                })
-            },
-        )
+        self.parts(storage).join(path_separator.0)
     }
 
-    /// Resolve each part of the tag.
+    /// Resolve each part of the tag into a collection of your choosing.
     ///
     /// Note that the returned string slices are views into the underlying interner
     /// data, which means you're holding a borrow on the interner as long as the slices
     /// are held. If you want to let go of the borrow, copy the slices into new owned
     /// strings.
-    pub fn resolve_parts<'intern, B, H, C>(
-        &self,
-        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
-    ) -> Result<C, ResolveError>
+    pub fn resolve_parts<'s, H, C>(&'s self, storage: &'s Storage<'brand, L, K, H>) -> C
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
-        C: FromIterator<&'intern str>,
+        H: BuildHasher + Clone,
+        C: FromIterator<&'s str>,
     {
-        self.try_resolve_parts(storage).collect()
+        self.parts(storage).collect()
     }
 
-    /// Try to resolve each part of the tag.
-    ///
-    /// This lets you partially resolve the tag, if for some reason individual
-    /// parts don't resolve.
-    ///
-    /// Note that the returned string slices are views into the underlying interner
-    /// data, which means you're holding a borrow on the interner as long as the slices
-    /// are held. If you want to let go of the borrow, copy the slices into new owned
-    /// strings.
-    pub fn try_resolve_parts<'s, 'intern: 's, B, H>(
+    /// Iterate over the resolved parts of the tag.
+    pub fn parts<'s, H>(
         &'s self,
-        storage: &'intern StorageLock<'_, 'brand, L, B, H>,
-    ) -> impl Iterator<Item = Result<&'intern str, ResolveError>> + 's
+        storage: &'s Storage<'brand, L, K, H>,
+    ) -> impl Iterator<Item = &'s str> + 's
     where
-        B: InternerBackend<Symbol = S>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
-        // Deref down to the interner itself before building the iterator. Capturing
-        // the `StorageLock` would make the returned iterator capture its `'brand` and
-        // `'lock` too, which the `+ 's` bound doesn't name.
-        let interner: &'intern StringInterner<B, H> = storage;
+        // Hold the interner rather than the storage: `Storage` names `'brand`, so
+        // capturing it would make the returned iterator capture `'brand` too, which
+        // the `+ 's` bound doesn't name. `Interner` doesn't mention the brand.
+        let interner: &'s Interner<K, H> = storage.handle();
 
         self.0
             .iter()
             .copied()
-            .map(move |part| interner.resolve(part).ok_or(ResolveError::PartNotFound))
+            .map(move |part| interner.resolve(&part))
     }
 }
 
-impl<'brand, L: Label, S: Symbol> Tag<'brand> for MultipartTag<'brand, L, S> {
+impl<'brand, L: Label, K: Key + Hash> Tag<'brand> for MultipartTag<'brand, L, K> {
     type Label = L;
-    type Symbol = S;
+    type Key = K;
 
-    fn resolve<B, H>(
+    fn resolve<H>(
         &self,
-        storage: &StorageLock<'_, 'brand, Self::Label, B, H>,
+        storage: &Storage<'brand, Self::Label, Self::Key, H>,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
-    ) -> Result<String, ResolveError>
+    ) -> String
     where
-        B: InternerBackend<Symbol = Self::Symbol>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
         self.resolve(storage, key_value_separator, path_separator)
     }

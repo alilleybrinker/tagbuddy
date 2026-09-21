@@ -6,20 +6,18 @@ use crate::error::ParseError;
 use crate::label::DefaultLabel;
 use crate::label::Label;
 pub use crate::parse::adapters::*;
-#[cfg(doc)]
+use crate::storage::Key;
+use crate::storage::Spur;
 use crate::storage::Storage;
-use crate::storage::StorageLock;
 use crate::tag::*;
 #[cfg(doc)]
 use crate::TagManager;
 use std::hash::BuildHasher;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::Not as _;
 use std::sync::Arc;
 use std::sync::Mutex;
-use string_interner::backend::Backend as InternerBackend;
-use string_interner::DefaultSymbol;
-use string_interner::Symbol;
 
 /// Types that provide a strategy for parsing tags.
 ///
@@ -33,16 +31,20 @@ pub trait Parser<'brand> {
     type Tag: Tag<'brand>;
 
     /// Parse a given string to produce a new [`Tag`].
-    fn parse<B, H>(
+    fn parse<H>(
         &self,
-        storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
+        storage: &Storage<
+            'brand,
+            <Self::Tag as Tag<'brand>>::Label,
+            <Self::Tag as Tag<'brand>>::Key,
+            H,
+        >,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,
     ) -> Result<Self::Tag, ParseError>
     where
-        B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
-        H: BuildHasher;
+        H: BuildHasher + Clone;
 }
 
 // Implement Parser for any Parser wrapped in `Arc<Mutex<_>>`, to enable
@@ -54,16 +56,20 @@ where
 {
     type Tag = P::Tag;
 
-    fn parse<B, H>(
+    fn parse<H>(
         &self,
-        storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
+        storage: &Storage<
+            'brand,
+            <Self::Tag as Tag<'brand>>::Label,
+            <Self::Tag as Tag<'brand>>::Key,
+            H,
+        >,
         key_value_separator: KeyValueSep,
         path_separator: PathSep,
         raw: &str,
     ) -> Result<Self::Tag, ParseError>
     where
-        B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
-        H: BuildHasher,
+        H: BuildHasher + Clone,
     {
         let internal_parser = self.lock().map_err(|_| ParseError::CouldNotLock)?;
         internal_parser.parse(storage, key_value_separator, path_separator, raw)
@@ -140,19 +146,19 @@ macro_rules! parsers {
     ) => {
         $( #[$($attrss)*] )*
         #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
-        pub struct $struct<L: Label = DefaultLabel, S: Symbol = DefaultSymbol> {
+        pub struct $struct<L: Label = DefaultLabel, K: Key + Hash = Spur> {
             _label: PhantomData<L>,
-            _symbol: PhantomData<S>,
+            _key: PhantomData<K>,
             $( $field_name: $field_ty ),*
         }
 
-        impl<L, S> $struct<L, S> where L: Label, S: Symbol {
+        impl<L, K> $struct<L, K> where L: Label, K: Key + Hash {
             /// Construct a new parser.
             #[allow(clippy::new_without_default)]
             pub fn new($( $field_name: $field_ty ),*) -> Self {
                 Self {
                     _label: PhantomData,
-                    _symbol: PhantomData,
+                    _key: PhantomData,
                     $($field_name),*
                 }
             }
@@ -161,36 +167,33 @@ macro_rules! parsers {
             ///
             /// The produced tag carries the `'brand` of the storage it was interned into.
             #[allow(clippy::redundant_closure_call)]
-            pub fn parse<'brand, B, H>(
+            pub fn parse<'brand, H>(
                 &self,
-                storage: &mut StorageLock<'_, 'brand, L, B, H>,
+                storage: &Storage<'brand, L, K, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str
-            ) -> Result<$tag<'brand, L, S>, ParseError>
+            ) -> Result<$tag<'brand, L, K>, ParseError>
             where
-                S: Symbol,
-                B: InternerBackend<Symbol = S>,
-                H: BuildHasher
+                H: BuildHasher + Clone
             {
                 check_empty(raw)?;
                 ($parser)(self, storage, key_value_separator, path_separator, raw)
             }
         }
 
-        impl<'brand, L: Label, S: Symbol> Parser<'brand> for $struct<L, S> {
-            type Tag = $tag<'brand, L, S>;
+        impl<'brand, L: Label, K: Key + Hash> Parser<'brand> for $struct<L, K> {
+            type Tag = $tag<'brand, L, K>;
 
-            fn parse<B, H>(
+            fn parse<H>(
                 &self,
-                storage: &mut StorageLock<'_, 'brand, <Self::Tag as Tag<'brand>>::Label, B, H>,
+                storage: &Storage<'brand, <Self::Tag as Tag<'brand>>::Label, <Self::Tag as Tag<'brand>>::Key, H>,
                 key_value_separator: KeyValueSep,
                 path_separator: PathSep,
                 raw: &str
             ) -> Result<Self::Tag, ParseError>
             where
-                B: InternerBackend<Symbol = <Self::Tag as Tag<'brand>>::Symbol>,
-                H: BuildHasher
+                H: BuildHasher + Clone
             {
                 self.parse(storage, key_value_separator, path_separator, raw)
             }
@@ -244,7 +247,7 @@ parsers! {
 
     /// Key-value parser, `':'` default separator.
     KeyValue { policy: KvPolicy } => KeyValueTag {
-        |this: &KeyValue<L, S>, interner, key_value_separator: KeyValueSep, _path_separator, raw: &str| {
+        |this: &KeyValue<L, K>, interner, key_value_separator: KeyValueSep, _path_separator, raw: &str| {
             let (key, value) = match this.policy {
                 KvPolicy::NoAmbiguousSep => {
                     let (key, value) = raw
@@ -273,7 +276,7 @@ parsers! {
 
     /// Multipart parser, splits parts on separator, `'/'` default separator.
     Multipart { policy: MultipartPolicy } => MultipartTag {
-        |this: &Multipart<L, S>, interner, _key_value_separator, path_separator: PathSep, raw: &str| {
+        |this: &Multipart<L, K>, interner, _key_value_separator, path_separator: PathSep, raw: &str| {
             let parts = raw.split(path_separator.0);
 
             if this.policy == MultipartPolicy::RequireMultipart && parts.clone().count() < 2 {

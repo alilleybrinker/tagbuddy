@@ -7,6 +7,8 @@ use crate::label::DefaultLabel;
 use crate::label::Label;
 use crate::parse::*;
 use crate::storage::DefaultStorage;
+use crate::storage::Key;
+use crate::storage::Spur;
 use crate::tag::KeyValueSep;
 use crate::tag::KeyValueTag;
 use crate::tag::MultipartTag;
@@ -16,25 +18,24 @@ use crate::tag::TagKind;
 use crate::TagManager;
 use anyhow::anyhow as err;
 use anyhow::Result;
+use std::hash::Hash;
 use std::sync::Arc;
-use string_interner::DefaultSymbol;
-use string_interner::Symbol;
 
 // Helper function to test that a tag that's parsed and then resolved
 // back into a string results in the same string that was originally
 // put into the manager.
-fn test_roundtrip<'brand, L, S, T, P>(
-    manager: &TagManager<'brand, L, S, T, P>,
+fn test_roundtrip<'brand, L, K, T, P>(
+    manager: &TagManager<'brand, L, K, T, P>,
     input: &str,
 ) -> Result<()>
 where
     L: Label,
-    S: Symbol,
-    T: Tag<'brand, Label = L, Symbol = S>,
+    K: Key + Hash,
+    T: Tag<'brand, Label = L, Key = K>,
     P: Parser<'brand, Tag = T> + Send + Sync,
 {
     let tag = manager.parse_tag(input)?;
-    let output = manager.resolve_tag(&tag)?;
+    let output = manager.resolve_tag(&tag);
     assert_eq!(input, output);
     Ok(())
 }
@@ -66,8 +67,7 @@ fn transform_tag() -> Result<()> {
         .build();
 
     let tag = manager.parse_tag(" \t     HELLO_WORLD/GOODBYE_WORLD    ")?;
-    let interner = manager.storage().lock()?;
-    let (key, value) = tag.resolve_key_value(&interner)?;
+    let (key, value) = tag.resolve_key_value(manager.storage());
 
     assert_eq!(key, "hello_world");
     assert_eq!(value, "goodbye_world");
@@ -96,8 +96,7 @@ fn key_part_key_value_tag_unambiguous() -> Result<()> {
 
     let input = "hello:world";
     let tag = manager.parse_tag(input)?;
-    let lock = manager.storage().lock()?;
-    let (key, value) = tag.resolve_key_value(&lock)?;
+    let (key, value) = tag.resolve_key_value(manager.storage());
     assert_eq!(key, "hello");
     assert_eq!(value, "world");
 
@@ -125,8 +124,7 @@ fn key_part_key_value_tag_split_first() -> Result<()> {
 
     let input = "hello:world:today";
     let tag = manager.parse_tag(input)?;
-    let lock = manager.storage().lock()?;
-    let (key, value) = tag.resolve_key_value(&lock)?;
+    let (key, value) = tag.resolve_key_value(manager.storage());
     assert_eq!(key, "hello");
     assert_eq!(value, "world:today");
     Ok(())
@@ -153,8 +151,7 @@ fn key_part_key_value_tag_split_last() -> Result<()> {
 
     let input = "hello:world:today";
     let tag = manager.parse_tag(input)?;
-    let lock = manager.storage().lock()?;
-    let (key, value) = tag.resolve_key_value(&lock)?;
+    let (key, value) = tag.resolve_key_value(manager.storage());
     assert_eq!(key, "hello:world");
     assert_eq!(value, "today");
     Ok(())
@@ -211,7 +208,7 @@ fn complex_parser() -> Result<()> {
 fn key_value_manager<'brand>(
     guard: Guard<'brand>,
     policy: KvPolicy,
-) -> TagManager<'brand, DefaultLabel, DefaultSymbol, KeyValueTag<'brand>, KeyValue> {
+) -> TagManager<'brand, DefaultLabel, Spur, KeyValueTag<'brand>, KeyValue> {
     TagManager::builder()
         .parser(KeyValue::new(policy))
         .storage(DefaultStorage::fresh(guard))
@@ -302,9 +299,8 @@ fn batch_parse_and_resolve_roundtrip() -> Result<()> {
 
     let inputs = ["hello", "world", "today"];
 
-    // Both of these take the storage lock exactly once, for the whole batch.
     let tags: Vec<_> = manager.parse_tags_into::<Result<Vec<_>, _>>(inputs)?;
-    let resolved: Vec<String> = manager.resolve_tags_into::<Result<Vec<_>, _>>(&tags)?;
+    let resolved: Vec<String> = manager.resolve_tags_into::<Vec<_>>(&tags);
 
     assert_eq!(resolved, inputs);
 
@@ -327,7 +323,7 @@ fn batch_parse_reports_per_tag_errors() {
 fn multipart_manager<'brand>(
     guard: Guard<'brand>,
     policy: MultipartPolicy,
-) -> TagManager<'brand, DefaultLabel, DefaultSymbol, MultipartTag<'brand>, Multipart> {
+) -> TagManager<'brand, DefaultLabel, Spur, MultipartTag<'brand>, Multipart> {
     TagManager::builder()
         .parser(Multipart::new(policy))
         .storage(DefaultStorage::fresh(guard))
@@ -402,8 +398,8 @@ fn share_as_keeps_the_brand() -> Result<()> {
     let tag = manager.parse_tag("hello")?;
 
     // Same brand, so the tag resolves through either one.
-    assert_eq!(manager.resolve_tag(&tag)?, "hello");
-    assert_eq!(shared.resolve_tag(&tag)?, "hello");
+    assert_eq!(manager.resolve_tag(&tag), "hello");
+    assert_eq!(shared.resolve_tag(&tag), "hello");
 
     Ok(())
 }
@@ -420,7 +416,7 @@ fn try_share_as_adopts_the_brand_for_the_same_interner() -> Result<()> {
     let tag = manager.parse_tag("hello")?;
 
     // A bare handle to the very same interner, separated from its storage.
-    let handle = Arc::clone(manager.storage());
+    let handle = Arc::clone(manager.storage().handle());
 
     let adopted = manager
         .storage()
@@ -433,7 +429,7 @@ fn try_share_as_adopts_the_brand_for_the_same_interner() -> Result<()> {
         .build();
 
     // The brand came along, so the original tag still resolves.
-    assert_eq!(adopted_manager.resolve_tag(&tag)?, "hello");
+    assert_eq!(adopted_manager.resolve_tag(&tag), "hello");
 
     Ok(())
 }
@@ -447,10 +443,42 @@ fn try_share_as_refuses_a_different_interner() {
     let second = DefaultStorage::fresh(two);
 
     // A handle to a genuinely different interner must not inherit `first`'s brand.
-    let foreign = Arc::clone(&second);
+    let foreign = Arc::clone(second.handle());
     assert!(first.try_share_as::<DefaultLabel>(&foreign).is_none());
 
     // ... while its own handle is accepted.
-    let own = Arc::clone(&first);
+    let own = Arc::clone(first.handle());
     assert!(first.try_share_as::<DefaultLabel>(&own).is_some());
+}
+
+#[test]
+fn tags_resolve_concurrently_without_a_lock() {
+    make_guard!(guard);
+
+    let manager = TagManager::builder()
+        .parser(Plain::new())
+        .storage(DefaultStorage::fresh(guard))
+        .build();
+
+    // Storage holds its interner behind an `Arc` with no `Mutex`, so many threads can
+    // intern and resolve through `&TagManager` at once. Under the old `Mutex<_>` this
+    // serialized; the point here is that it compiles at all -- `&TagManager` being
+    // usable from several threads is what the lockless interner buys.
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let manager = &manager;
+
+            scope.spawn(move || {
+                for i in 0..256 {
+                    // Overlapping vocabularies, so threads race on the same strings.
+                    let raw = format!("tag-{}", i % 16);
+                    let tag = manager.parse_tag(&raw).expect("plain tags always parse");
+                    assert_eq!(manager.resolve_tag(&tag), raw);
+                }
+            });
+        }
+    });
+
+    // Every thread interned the same 16 strings, and interning dedupes.
+    assert_eq!(manager.storage().len(), 16);
 }

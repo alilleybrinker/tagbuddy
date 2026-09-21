@@ -5,10 +5,10 @@ pub mod blog {
     use std::ops::Not as _;
     use std::result::Result as StdResult;
     use std::slice::Iter as SliceIter;
-    use string_interner::DefaultSymbol;
     use tagbuddy::brand::Guard;
     use tagbuddy::generate_label;
     use tagbuddy::parse::*;
+    use tagbuddy::storage::Spur;
     use tagbuddy::storage::Storage;
     use tagbuddy::tag::KeyValueTag;
     use tagbuddy::tag::PlainTag;
@@ -21,9 +21,9 @@ pub mod blog {
     }
 
     type PostTagsManager<'brand> =
-        TagManager<'brand, Tags, DefaultSymbol, PlainTag<'brand, Tags>, Plain<Tags>>;
+        TagManager<'brand, Tags, Spur, PlainTag<'brand, Tags>, Plain<Tags>>;
     type PostRatingsManager<'brand> =
-        TagManager<'brand, Ratings, DefaultSymbol, KeyValueTag<'brand, Ratings>, KeyValue<Ratings>>;
+        TagManager<'brand, Ratings, Spur, KeyValueTag<'brand, Ratings>, KeyValue<Ratings>>;
 
     pub struct Blog<'brand> {
         posts: Vec<BlogPost<'brand>>,
@@ -109,20 +109,19 @@ pub mod blog {
     impl<'brand> BlogPost<'brand> {
         /// Get the tags applied to a blog post.
         pub fn tags(&self, blog: &Blog<'brand>) -> Vec<String> {
-            // The brand guarantees this is the storage that interned these tags, so the
-            // only way resolution fails now is a poisoned lock.
+            // No error to handle: the brand says these tags came from this storage, and
+            // the interner is append-only, so they're still there.
             blog.tag_manager
-                .resolve_tags_into::<StdResult<_, _>>(Tagged::<PlainTag<Tags>>::get_tags(self))
-                .expect("tags should always resolve successfully")
+                .resolve_tags_into::<Vec<_>>(Tagged::<PlainTag<Tags>>::get_tags(self))
         }
 
         /// Get the rating of a blog post.
         pub fn rating(&self, blog: &Blog<'brand>) -> String {
-            blog.rating_manager
-                .resolve_tags_into::<StdResult<_, _>>(Tagged::<KeyValueTag<Ratings>>::get_tags(
-                    self,
-                ))
-                .expect("ratings should always resolve successfully")
+            // Exactly one rating, so collecting the resolved tags into a `String`
+            // yields it directly.
+            Tagged::<KeyValueTag<Ratings>>::get_tags(self)
+                .map(|tag| blog.rating_manager.resolve_tag(tag))
+                .collect()
         }
     }
 
